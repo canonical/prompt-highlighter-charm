@@ -1,0 +1,13 @@
+options:
+  environment-type:
+    type: string
+    default: "development"
+    description: "The environment label to display (e.g., production, staging)."
+  prompt-color:
+    type: string
+    default: "green"
+    description: "Primary ANSI color for the prompt (red, green, yellow, blue)."
+  enable-zsh:
+    type: boolean
+    default: true
+    description: "If true, configures global Zsh profiles in addition to Bash."

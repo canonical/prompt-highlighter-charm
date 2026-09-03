@@ -1,0 +1,8 @@
+name: prompt-highlighter
+summary: Dynamically configures custom colored terminal prompts based on Juju configuration.
+description: |
+  A subordinate charm that deploys a Python-driven terminal prompt highlighter.
+  It configures system-wide profiles to alter prompt text and colors using Juju configs.
+version: 1.0.0
+type: subordinate
+base: ubuntu@24.04
