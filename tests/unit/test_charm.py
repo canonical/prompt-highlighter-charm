@@ -3,7 +3,9 @@
 
 """Unit tests for the prompt-highlighter charm."""
 
+import os
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -37,8 +39,21 @@ def ctx():
     )
 
 
-def run(ctx, event="config_changed", config=None):
-    state = testing.State(config=config or {}, leader=True)
+PRINCIPAL = testing.SubordinateRelation(
+    endpoint="juju-info",
+    interface="juju-info",
+    remote_app_name="ubuntu",
+    remote_unit_id=3,
+)
+
+
+def run(ctx, event="config_changed", config=None, relations=(PRINCIPAL,)):
+    state = testing.State(
+        config=config or {},
+        relations=set(relations),
+        model=testing.Model(name="staging-mdl", type="lxd"),
+        leader=True,
+    )
     return ctx.run(getattr(ctx.on, event)(), state)
 
 
@@ -98,7 +113,7 @@ def test_disabling_zsh_removes_only_the_zsh_block(ctx, fs):
 
     assert charm_module.BLOCK_START not in fs["zshrc"].read_text()
     assert charm_module.BLOCK_START in fs["bashrc"].read_text()
-    assert out.unit_status.message.endswith("for bash")
+    assert "for bash on ubuntu/3" in out.unit_status.message
 
 
 def test_zsh_profile_is_not_created_when_disabled(ctx, fs):
@@ -111,7 +126,7 @@ def test_remove_undoes_every_change(ctx, fs):
     run(ctx)
     fs["bashrc"].write_text("keep me\n" + fs["bashrc"].read_text())
 
-    ctx.run(ctx.on.remove(), testing.State(leader=True))
+    ctx.run(ctx.on.remove(), testing.State(leader=True, relations={PRINCIPAL}))
 
     assert not fs["script"].exists()
     assert fs["bashrc"].read_text() == "keep me\n"
@@ -145,6 +160,11 @@ def test_config_values_are_normalised(ctx, fs):
     assert 'PROMPT_COLOR = "green"' in script
 
 
+def strip_escapes(prompt: str) -> str:
+    """Drop the colour codes and their zero-width markers, keeping the text."""
+    return re.sub(r"\\\[|\\\]|%\{|%\}|\033\[[0-9;]*m", "", prompt)
+
+
 def render_prompt(script: pathlib.Path, shell: str, cwd: pathlib.Path) -> str:
     return subprocess.run(
         [sys.executable, str(script), shell],
@@ -156,6 +176,49 @@ def render_prompt(script: pathlib.Path, shell: str, cwd: pathlib.Path) -> str:
     ).stdout
 
 
+def test_script_records_model_and_principal_unit(ctx, fs):
+    out = run(ctx)
+
+    script = fs["script"].read_text()
+    assert 'JUJU_MODEL = "staging-mdl"' in script
+    assert 'PRINCIPAL_UNIT = "ubuntu/3"' in script
+    assert "on ubuntu/3" in out.unit_status.message
+
+
+def test_relation_joined_refreshes_the_principal_unit(ctx, fs):
+    # Install fires before the principal has joined: the segment is unknown.
+    run(ctx, event="install", relations=())
+    assert 'PRINCIPAL_UNIT = ""' in fs["script"].read_text()
+
+    state = testing.State(
+        relations={PRINCIPAL},
+        model=testing.Model(name="staging-mdl", type="lxd"),
+        leader=True,
+    )
+    out = ctx.run(ctx.on.relation_joined(PRINCIPAL, remote_unit=3), state)
+
+    assert 'PRINCIPAL_UNIT = "ubuntu/3"' in fs["script"].read_text()
+    assert isinstance(out.unit_status, ops.ActiveStatus)
+
+
+def test_prompt_shows_env_model_unit_and_hostname(ctx, fs, tmp_path):
+    run(ctx, config={"environment-type": "production", "prompt-color": "red"})
+
+    out = strip_escapes(render_prompt(fs["script"], "bash", tmp_path))
+    hostname = os.uname().nodename
+
+    assert out == f"[PRODUCTION] - staging-mdl - ubuntu/3 - {hostname} ubuntu:{tmp_path}$ "
+
+
+def test_unknown_segments_are_omitted_not_blank(ctx, fs, tmp_path):
+    run(ctx, event="install", relations=())
+
+    out = strip_escapes(render_prompt(fs["script"], "bash", tmp_path))
+
+    assert " -  - " not in out
+    assert out.startswith(f"[DEVELOPMENT] - staging-mdl - {os.uname().nodename} ")
+
+
 def test_generated_script_wraps_escapes_for_bash(ctx, fs, tmp_path):
     run(ctx, config={"environment-type": "production", "prompt-color": "red"})
 
@@ -163,7 +226,7 @@ def test_generated_script_wraps_escapes_for_bash(ctx, fs, tmp_path):
 
     assert out.startswith("\\[\033[0;31m\\]")
     assert out.endswith("\\[\033[0m\\]")
-    assert "[PRODUCTION] ubuntu:" in out
+    assert "[PRODUCTION] - staging-mdl - ubuntu/3 - " in out
 
 
 def test_generated_script_wraps_escapes_for_zsh(ctx, fs, tmp_path):
@@ -173,7 +236,7 @@ def test_generated_script_wraps_escapes_for_zsh(ctx, fs, tmp_path):
 
     assert out.startswith("%{\033[0;34m%}")
     assert out.endswith("%{\033[0m%}")
-    assert "[STAGING] ubuntu:" in out
+    assert "[STAGING] - staging-mdl - ubuntu/3 - " in out
 
 
 def test_generated_script_escapes_prompt_metacharacters(ctx, fs, tmp_path):

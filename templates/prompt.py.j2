@@ -12,6 +12,8 @@ import sys
 
 ENVIRONMENT_LABEL = {{ environment_type | tojson }}
 PROMPT_COLOR = {{ prompt_color | tojson }}
+JUJU_MODEL = {{ juju_model | tojson }}
+PRINCIPAL_UNIT = {{ principal_unit | tojson }}
 
 COLORS = {
     "red": "\033[0;31m",
@@ -50,6 +52,18 @@ def current_user():
     return "user"
 
 
+def current_hostname():
+    """Return this machine's or container's hostname.
+
+    Read at prompt time rather than baked in at render time, so a renamed host
+    or a container cloned from an image reports itself correctly.
+    """
+    try:
+        return os.uname().nodename or "unknown-host"
+    except OSError:
+        return "unknown-host"
+
+
 def current_directory():
     try:
         cwd = os.getcwd()
@@ -66,12 +80,20 @@ def current_directory():
 def render(shell):
     open_, close = NON_PRINTING.get(shell, ("", ""))
     color = COLORS.get(PROMPT_COLOR.lower(), COLORS["green"])
-    label = quote(ENVIRONMENT_LABEL.upper(), shell)
+    # A segment that is not known -- most often the principal unit, before the
+    # juju-info relation has joined -- is dropped rather than shown as a blank.
+    segments = [
+        "[" + ENVIRONMENT_LABEL.upper() + "]",
+        JUJU_MODEL,
+        PRINCIPAL_UNIT,
+        current_hostname(),
+    ]
+    header = " - ".join(quote(segment, shell) for segment in segments if segment)
     user = quote(current_user(), shell)
     cwd = quote(current_directory(), shell)
     return (
         open_ + color + close
-        + "[" + label + "] " + user + ":" + cwd + "$ "
+        + header + " " + user + ":" + cwd + "$ "
         + open_ + RESET + close
     )
 

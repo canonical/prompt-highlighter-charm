@@ -22,6 +22,9 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 logger = logging.getLogger(__name__)
 
+# The container-scoped endpoint that ties this subordinate to its principal.
+PRINCIPAL_ENDPOINT = "juju-info"
+
 PROMPT_SCRIPT = pathlib.Path("/usr/local/bin/juju_dynamic_prompt.py")
 BASH_RC = pathlib.Path("/etc/bash.bashrc")
 ZSH_RC = pathlib.Path("/etc/zsh/zshrc")
@@ -108,6 +111,11 @@ class PromptHighlighterCharm(ops.CharmBase):
             self.on.start,
             self.on.upgrade_charm,
             self.on.config_changed,
+            # The principal unit name is only knowable once it has joined, so
+            # re-render then too. relation-broken is skipped: the subordinate
+            # unit is being torn down at that point anyway.
+            self.on[PRINCIPAL_ENDPOINT].relation_joined,
+            self.on[PRINCIPAL_ENDPOINT].relation_changed,
         ):
             framework.observe(event, self._reconcile)
         framework.observe(self.on.remove, self._on_remove)
@@ -131,9 +139,11 @@ class PromptHighlighterCharm(ops.CharmBase):
             return
 
         shells = "bash and zsh" if config.enable_zsh else "bash"
+        principal = self._principal_unit()
+        alongside = f" on {principal}" if principal else ""
         self.unit.status = ops.ActiveStatus(
             f"Prompt set to {config.environment_type} "
-            f"({config.prompt_color}) for {shells}"
+            f"({config.prompt_color}) for {shells}{alongside}"
         )
 
     def _on_remove(self, _: ops.RemoveEvent) -> None:
@@ -147,6 +157,17 @@ class PromptHighlighterCharm(ops.CharmBase):
             # Removal must not block teardown; the operator can clean up by hand.
             logger.exception("Failed to remove prompt configuration")
 
+    def _principal_unit(self) -> str | None:
+        """Return the principal unit this subordinate shares a machine with.
+
+        The juju-info relation is container-scoped, so it holds exactly one
+        remote unit. It is absent until relation-joined has fired.
+        """
+        for relation in self.model.relations[PRINCIPAL_ENDPOINT]:
+            for unit in relation.units:
+                return unit.name
+        return None
+
     def _render_script(self, config: PromptConfig) -> str:
         """Render templates/prompt.py.j2 for the given configuration."""
         env = Environment(
@@ -159,6 +180,8 @@ class PromptHighlighterCharm(ops.CharmBase):
         return template.render(
             environment_type=config.environment_type,
             prompt_color=config.prompt_color,
+            juju_model=self.model.name,
+            principal_unit=self._principal_unit() or "",
         )
 
 
