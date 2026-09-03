@@ -1,14 +1,5 @@
 # prompt-highlighter — Specification
 
-Reverse-engineered from the code at `aa3621a` ("Rework charm"). Every statement
-below is grounded in a file and line reference; inferences and open questions are
-kept in [§10](#10-uncertainties-and-discrepancies) rather than mixed into the
-requirements.
-
-Requirements use [EARS](https://alistairmavin.com/ears/) phrasing:
-*ubiquitous* ("The charm shall …"), *event-driven* ("When X, the charm shall …"),
-*state-driven* ("While X, …"), *optional* ("Where X, …").
-
 ---
 
 ## 1. Purpose
