@@ -13,7 +13,7 @@ import sys
 ENVIRONMENT_LABEL = {{ environment_type | tojson }}
 PROMPT_COLOR = {{ prompt_color | tojson }}
 JUJU_MODEL = {{ juju_model | tojson }}
-PRINCIPAL_UNIT = {{ principal_unit | tojson }}
+PRINCIPAL_DIR = {{ principal_dir | tojson }}
 
 COLORS = {
     "red": "\033[0;31m",
@@ -52,6 +52,31 @@ def current_user():
     return "user"
 
 
+def current_principals():
+    """Return every Juju principal unit sharing this machine, comma separated.
+
+    Read at prompt time, not baked in: Juju runs one subordinate unit per
+    principal unit, so a machine hosting several principals has several
+    subordinate units, each dropping its own record here. Reading the directory
+    means a principal added or removed later shows up in shells that are
+    already open.
+    """
+    try:
+        entries = sorted(os.listdir(PRINCIPAL_DIR))
+    except OSError:
+        return ""
+    names = set()
+    for entry in entries:
+        try:
+            with open(os.path.join(PRINCIPAL_DIR, entry)) as handle:
+                name = handle.read().strip()
+        except OSError:
+            continue
+        if name:
+            names.add(name)
+    return ",".join(sorted(names))
+
+
 def current_hostname():
     """Return this machine's or container's hostname.
 
@@ -85,7 +110,7 @@ def render(shell):
     segments = [
         "[" + ENVIRONMENT_LABEL.upper() + "]",
         JUJU_MODEL,
-        PRINCIPAL_UNIT,
+        current_principals(),
         current_hostname(),
     ]
     header = " - ".join(quote(segment, shell) for segment in segments if segment)

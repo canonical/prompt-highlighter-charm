@@ -18,6 +18,11 @@ description: |
   Everything the charm writes is delimited by managed markers and is removed again
   when the charm is removed or when the corresponding option is disabled.
 
+  Juju runs *one subordinate unit per principal unit*, not one per machine. Relate
+  this charm to both `nova-compute` and `ceph-osd` and a machine hosting one unit of
+  each gets *two* `prompt-highlighter` units, both running hooks against the same
+  `/etc/bash.bashrc` and the same script.
+
 subordinate: true
 
 base: ubuntu@24.04

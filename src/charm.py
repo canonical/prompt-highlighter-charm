@@ -11,6 +11,7 @@ outside the charm directory is wrapped in managed markers so that it can be
 updated in place and removed cleanly.
 """
 
+import contextlib
 import dataclasses
 import logging
 import pathlib
@@ -26,6 +27,11 @@ logger = logging.getLogger(__name__)
 PRINCIPAL_ENDPOINT = "juju-info"
 
 PROMPT_SCRIPT = pathlib.Path("/usr/local/bin/juju_dynamic_prompt.py")
+# One file per subordinate unit on this machine, named after that unit and
+# holding its principal's name. Juju runs one subordinate unit per principal
+# unit, so several of them can share a machine; the directory listing is
+# therefore the set of principals here, and needs no cross-unit coordination.
+PRINCIPAL_DIR = pathlib.Path("/var/lib/juju-prompt-highlighter/principals")
 BASH_RC = pathlib.Path("/etc/bash.bashrc")
 ZSH_RC = pathlib.Path("/etc/zsh/zshrc")
 
@@ -129,7 +135,16 @@ class PromptHighlighterCharm(ops.CharmBase):
             return
 
         self.unit.status = ops.MaintenanceStatus("Applying prompt configuration")
+        principal = self._principal_unit()
         try:
+            # Publish only our own principal. The script and the profile
+            # snippets are identical for every unit of this application, so
+            # concurrent writes from sibling units are harmless.
+            record = self._principal_record()
+            if principal:
+                _write_file(record, f"{principal}\n", 0o644)
+            else:
+                record.unlink(missing_ok=True)
             _write_file(PROMPT_SCRIPT, self._render_script(config), 0o755)
             _apply_block(BASH_RC, _bash_snippet(), enabled=True)
             _apply_block(ZSH_RC, _zsh_snippet(), enabled=config.enable_zsh)
@@ -139,7 +154,6 @@ class PromptHighlighterCharm(ops.CharmBase):
             return
 
         shells = "bash and zsh" if config.enable_zsh else "bash"
-        principal = self._principal_unit()
         alongside = f" on {principal}" if principal else ""
         self.unit.status = ops.ActiveStatus(
             f"Prompt set to {config.environment_type} "
@@ -150,12 +164,30 @@ class PromptHighlighterCharm(ops.CharmBase):
         """Undo every change the charm made outside its own directory."""
         self.unit.status = ops.MaintenanceStatus("Removing prompt configuration")
         try:
+            self._principal_record().unlink(missing_ok=True)
+            remaining = _principal_records()
+            if remaining:
+                # Other subordinate units still share this machine and are still
+                # using the script and the profile snippets. Only our record goes.
+                logger.info(
+                    "Keeping shell configuration for %d other unit(s) here: %s",
+                    len(remaining),
+                    ", ".join(remaining),
+                )
+                return
             _apply_block(BASH_RC, _bash_snippet(), enabled=False)
             _apply_block(ZSH_RC, _zsh_snippet(), enabled=False)
             PROMPT_SCRIPT.unlink(missing_ok=True)
+            with contextlib.suppress(OSError):
+                PRINCIPAL_DIR.rmdir()
+                PRINCIPAL_DIR.parent.rmdir()
         except OSError:
             # Removal must not block teardown; the operator can clean up by hand.
             logger.exception("Failed to remove prompt configuration")
+
+    def _principal_record(self) -> pathlib.Path:
+        """Return this unit's own principal record file."""
+        return PRINCIPAL_DIR / self.unit.name.replace("/", "-")
 
     def _principal_unit(self) -> str | None:
         """Return the principal unit this subordinate shares a machine with.
@@ -181,8 +213,16 @@ class PromptHighlighterCharm(ops.CharmBase):
             environment_type=config.environment_type,
             prompt_color=config.prompt_color,
             juju_model=self.model.name,
-            principal_unit=self._principal_unit() or "",
+            principal_dir=str(PRINCIPAL_DIR),
         )
+
+
+def _principal_records() -> list[str]:
+    """Return the names of every subordinate unit with a record on this machine."""
+    try:
+        return sorted(path.name for path in PRINCIPAL_DIR.iterdir() if path.is_file())
+    except OSError:
+        return []
 
 
 def _write_file(path: pathlib.Path, content: str, mode: int) -> None:

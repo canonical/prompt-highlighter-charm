@@ -24,19 +24,26 @@ def fs(tmp_path, monkeypatch):
         "script": tmp_path / "usr/local/bin/juju_dynamic_prompt.py",
         "bashrc": tmp_path / "etc/bash.bashrc",
         "zshrc": tmp_path / "etc/zsh/zshrc",
+        "principals": tmp_path / "var/lib/juju-prompt-highlighter/principals",
     }
     monkeypatch.setattr(charm_module, "PROMPT_SCRIPT", paths["script"])
     monkeypatch.setattr(charm_module, "BASH_RC", paths["bashrc"])
     monkeypatch.setattr(charm_module, "ZSH_RC", paths["zshrc"])
+    monkeypatch.setattr(charm_module, "PRINCIPAL_DIR", paths["principals"])
     return paths
+
+
+def make_ctx(unit_id=0):
+    return testing.Context(
+        PromptHighlighterCharm,
+        charm_root=pathlib.Path(__file__).parents[2],
+        unit_id=unit_id,
+    )
 
 
 @pytest.fixture
 def ctx():
-    return testing.Context(
-        PromptHighlighterCharm,
-        charm_root=pathlib.Path(__file__).parents[2],
-    )
+    return make_ctx()
 
 
 PRINCIPAL = testing.SubordinateRelation(
@@ -181,14 +188,17 @@ def test_script_records_model_and_principal_unit(ctx, fs):
 
     script = fs["script"].read_text()
     assert 'JUJU_MODEL = "staging-mdl"' in script
-    assert 'PRINCIPAL_UNIT = "ubuntu/3"' in script
+    assert f'PRINCIPAL_DIR = "{fs["principals"]}"' in script
+    # The principal goes in this unit's own record, so sibling units on the
+    # same machine do not overwrite each other's answer.
+    assert (fs["principals"] / "prompt-highlighter-0").read_text() == "ubuntu/3\n"
     assert "on ubuntu/3" in out.unit_status.message
 
 
 def test_relation_joined_refreshes_the_principal_unit(ctx, fs):
     # Install fires before the principal has joined: the segment is unknown.
     run(ctx, event="install", relations=())
-    assert 'PRINCIPAL_UNIT = ""' in fs["script"].read_text()
+    assert not (fs["principals"] / "prompt-highlighter-0").exists()
 
     state = testing.State(
         relations={PRINCIPAL},
@@ -197,7 +207,7 @@ def test_relation_joined_refreshes_the_principal_unit(ctx, fs):
     )
     out = ctx.run(ctx.on.relation_joined(PRINCIPAL, remote_unit=3), state)
 
-    assert 'PRINCIPAL_UNIT = "ubuntu/3"' in fs["script"].read_text()
+    assert (fs["principals"] / "prompt-highlighter-0").read_text() == "ubuntu/3\n"
     assert isinstance(out.unit_status, ops.ActiveStatus)
 
 
@@ -217,6 +227,59 @@ def test_unknown_segments_are_omitted_not_blank(ctx, fs, tmp_path):
 
     assert " -  - " not in out
     assert out.startswith(f"[DEVELOPMENT] - staging-mdl - {os.uname().nodename} ")
+
+
+def test_two_subordinate_units_on_one_machine_list_both_principals(fs, tmp_path):
+    """Juju runs one subordinate unit per principal unit, so a machine hosting
+    two principals hosts two of our units, both writing the same files."""
+    nova = testing.SubordinateRelation(
+        endpoint="juju-info", interface="juju-info",
+        remote_app_name="nova-compute", remote_unit_id=0,
+    )
+    ceph = testing.SubordinateRelation(
+        endpoint="juju-info", interface="juju-info",
+        remote_app_name="ceph-osd", remote_unit_id=2,
+    )
+    run(make_ctx(unit_id=0), relations=(nova,))
+    run(make_ctx(unit_id=1), relations=(ceph,))
+
+    assert sorted(p.name for p in fs["principals"].iterdir()) == [
+        "prompt-highlighter-0",
+        "prompt-highlighter-1",
+    ]
+    out = strip_escapes(render_prompt(fs["script"], "bash", tmp_path))
+    assert "- ceph-osd/2,nova-compute/0 -" in out
+
+
+def test_removing_one_unit_keeps_the_prompt_for_its_sibling(fs, tmp_path):
+    other = testing.SubordinateRelation(
+        endpoint="juju-info", interface="juju-info",
+        remote_app_name="ceph-osd", remote_unit_id=2,
+    )
+    run(make_ctx(unit_id=0), relations=(PRINCIPAL,))
+    run(make_ctx(unit_id=1), relations=(other,))
+
+    make_ctx(unit_id=0).run(
+        make_ctx(unit_id=0).on.remove(),
+        testing.State(leader=True, relations={PRINCIPAL}),
+    )
+
+    # Our record is gone; the shared files stay for prompt-highlighter/1.
+    assert not (fs["principals"] / "prompt-highlighter-0").exists()
+    assert fs["script"].exists()
+    assert charm_module.BLOCK_START in fs["bashrc"].read_text()
+    out = strip_escapes(render_prompt(fs["script"], "bash", tmp_path))
+    assert "- ceph-osd/2 -" in out
+
+
+def test_last_unit_off_the_machine_cleans_everything(ctx, fs):
+    run(ctx)
+
+    ctx.run(ctx.on.remove(), testing.State(leader=True, relations={PRINCIPAL}))
+
+    assert not fs["script"].exists()
+    assert not fs["principals"].exists()
+    assert charm_module.BLOCK_START not in fs["bashrc"].read_text()
 
 
 def test_generated_script_wraps_escapes_for_bash(ctx, fs, tmp_path):
