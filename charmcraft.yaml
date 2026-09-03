@@ -1,0 +1,66 @@
+# Copyright 2025 Canonical Ltd.
+# See LICENSE file for licensing details.
+
+name: prompt-highlighter
+type: charm
+title: Prompt Highlighter
+
+summary: Dynamically configures custom colored terminal prompts based on Juju configuration.
+
+description: |
+  A subordinate charm that deploys a Python-driven terminal prompt highlighter.
+
+  It renders /usr/local/bin/juju_dynamic_prompt.py from the charm's template and
+  installs a managed snippet into the system-wide Bash profile (and optionally the
+  Zsh profile), so every interactive shell on the unit shows the configured
+  environment label in the configured colour.
+
+  Everything the charm writes is delimited by managed markers and is removed again
+  when the charm is removed or when the corresponding option is disabled.
+
+subordinate: true
+
+base: ubuntu@24.04
+platforms:
+  amd64:
+
+# A subordinate charm must request container scope on at least one endpoint,
+# otherwise Juju refuses to deploy it.
+requires:
+  juju-info:
+    interface: juju-info
+    scope: container
+
+config:
+  options:
+    environment-type:
+      type: string
+      default: "development"
+      description: >
+        The environment label to display (e.g. production, staging).
+        Limited to 32 characters from [A-Za-z0-9 _.:@+-] so that it is safe to
+        embed in a shell prompt.
+    prompt-color:
+      type: string
+      default: "green"
+      description: >
+        Primary ANSI colour for the prompt. One of: red, green, yellow, blue,
+        magenta, cyan, white.
+    enable-zsh:
+      type: boolean
+      default: true
+      description: >
+        If true, configure the global Zsh profile in addition to Bash. Setting
+        this back to false removes the Zsh configuration again.
+
+parts:
+  charm:
+    plugin: charm
+    source: .
+    # Exclusion-only filters: everything else is still primed.
+    prime:
+      - "-**/__pycache__"
+      - "-**/*.pyc"
+      - "-tests"
+      - "-tox.ini"
+      - "-pyproject.toml"

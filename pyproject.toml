@@ -1,0 +1,13 @@
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
+
+[tool.ruff]
+line-length = 99
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "D", "UP", "B", "C4", "RUF"]
+ignore = ["D203", "D213"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D100", "D103"]

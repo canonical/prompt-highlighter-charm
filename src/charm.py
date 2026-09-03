@@ -1,50 +1,210 @@
 #!/usr/bin/env python3
-import os
-from jinja2 import Environment, FileSystemLoader
-from ops import CharmBase, main, ActiveStatus, BlockedStatus
+# Copyright 2025 Canonical Ltd.
+# See LICENSE file for licensing details.
 
-class PromptHighlighterCharm(CharmBase):
-    def __init__(self, *args):
-        super().__init__(*args)
-        self.framework.observe(self.on.config_changed, self._on_config_changed)
+"""Subordinate charm that installs a colour-coded, system-wide shell prompt.
 
-    def _on_config_changed(self, event):
-        env_type = self.config.get("environment-type")
-        color = self.config.get("prompt-color")
-        enable_zsh = self.config.get("enable-zsh")
+The charm renders a small Python script from ``templates/prompt.py.j2`` and
+installs it as ``/usr/local/bin/juju_dynamic_prompt.py``. Global shell profiles
+then call that script to build the prompt on every command. Everything written
+outside the charm directory is wrapped in managed markers so that it can be
+updated in place and removed cleanly.
+"""
 
-        # 1. Write Python runner script to target path
+import dataclasses
+import logging
+import pathlib
+import re
+import typing
+
+import ops
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
+
+logger = logging.getLogger(__name__)
+
+PROMPT_SCRIPT = pathlib.Path("/usr/local/bin/juju_dynamic_prompt.py")
+BASH_RC = pathlib.Path("/etc/bash.bashrc")
+ZSH_RC = pathlib.Path("/etc/zsh/zshrc")
+
+BLOCK_START = "# BEGIN prompt-highlighter charm (managed) -- do not edit"
+BLOCK_END = "# END prompt-highlighter charm"
+
+VALID_COLORS = ("red", "green", "yellow", "blue", "magenta", "cyan", "white")
+ENV_LABEL = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9 _.:@+-]{0,31}$")
+
+
+def _bash_snippet() -> str:
+    """Return the Bash profile snippet that installs the prompt hook."""
+    return f"""\
+case $- in
+    *i*) ;;
+    *) return ;;
+esac
+_juju_prompt_highlighter() {{
+    PS1="$({PROMPT_SCRIPT} bash)"
+}}
+case "$PROMPT_COMMAND" in
+    *_juju_prompt_highlighter*) ;;
+    "") PROMPT_COMMAND=_juju_prompt_highlighter ;;
+    *) PROMPT_COMMAND="_juju_prompt_highlighter;$PROMPT_COMMAND" ;;
+esac
+"""
+
+
+def _zsh_snippet() -> str:
+    """Return the Zsh profile snippet that installs the prompt hook."""
+    return f"""\
+_juju_prompt_highlighter() {{
+    PROMPT="$({PROMPT_SCRIPT} zsh)"
+}}
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd _juju_prompt_highlighter
+"""
+
+
+class ConfigError(Exception):
+    """Raised when the Juju configuration cannot be applied as given."""
+
+
+@dataclasses.dataclass(frozen=True)
+class PromptConfig:
+    """Validated view of the charm's configuration options."""
+
+    environment_type: str
+    prompt_color: str
+    enable_zsh: bool
+
+    @classmethod
+    def load(cls, config: ops.ConfigData) -> "PromptConfig":
+        """Read and validate the charm config, raising ConfigError if unusable."""
+        environment_type = typing.cast(str, config["environment-type"]).strip()
+        if not ENV_LABEL.match(environment_type):
+            raise ConfigError(
+                f"invalid environment-type {environment_type!r}: expected 1-32 "
+                "characters from [A-Za-z0-9 _.:@+-]"
+            )
+
+        prompt_color = typing.cast(str, config["prompt-color"]).strip().lower()
+        if prompt_color not in VALID_COLORS:
+            raise ConfigError(
+                f"invalid prompt-color {prompt_color!r}: expected one of "
+                f"{', '.join(VALID_COLORS)}"
+            )
+
+        return cls(
+            environment_type=environment_type,
+            prompt_color=prompt_color,
+            enable_zsh=typing.cast(bool, config["enable-zsh"]),
+        )
+
+
+class PromptHighlighterCharm(ops.CharmBase):
+    """Keep the on-disk prompt configuration in sync with the Juju config."""
+
+    def __init__(self, framework: ops.Framework):
+        super().__init__(framework)
+        for event in (
+            self.on.install,
+            self.on.start,
+            self.on.upgrade_charm,
+            self.on.config_changed,
+        ):
+            framework.observe(event, self._reconcile)
+        framework.observe(self.on.remove, self._on_remove)
+
+    def _reconcile(self, _: ops.EventBase) -> None:
+        """Render the prompt script and (re)apply the shell profile snippets."""
         try:
-            jinja_env = Environment(loader=FileSystemLoader("templates"))
-            template = jinja_env.get_template("prompt.py.j2")
-            rendered_script = template.render(environment_type=env_type, prompt_color=color)
-            
-            script_path = "/usr/local/bin/juju_dynamic_prompt.py"
-            with open(script_path, "w") as f:
-                f.write(rendered_script)
-            os.chmod(script_path, 0o755)
-        except Exception as e:
-            self.unit.status = BlockedStatus(f"Failed script generation: {str(e)}")
+            config = PromptConfig.load(self.config)
+        except ConfigError as exc:
+            self.unit.status = ops.BlockedStatus(str(exc))
             return
 
-        # 2. Append hook wrapper to global Bash configuration
-        bash_snippet = "\nset_bash_prompt() { PS1=$(/usr/local/bin/juju_dynamic_prompt.py); }\nPROMPT_COMMAND=set_bash_prompt\n"
-        self._append_profile("/etc/bash.bashrc", bash_snippet)
+        self.unit.status = ops.MaintenanceStatus("Applying prompt configuration")
+        try:
+            _write_file(PROMPT_SCRIPT, self._render_script(config), 0o755)
+            _apply_block(BASH_RC, _bash_snippet(), enabled=True)
+            _apply_block(ZSH_RC, _zsh_snippet(), enabled=config.enable_zsh)
+        except OSError as exc:
+            logger.exception("Failed to apply prompt configuration")
+            self.unit.status = ops.BlockedStatus(f"Failed to apply prompt: {exc}")
+            return
 
-        # 3. Append hook wrapper to global Zsh configuration
-        if enable_zsh:
-            zsh_snippet = "\nsetopt prompt_subst\nset_zsh_prompt() { PROMPT='$(/usr/local/bin/juju_dynamic_prompt.py)'; }\nautoload -Uz add-zsh-hook\nadd-zsh-hook precmd set_zsh_prompt\n"
-            self._append_profile("/etc/zsh/zshrc", zsh_snippet)
+        shells = "bash and zsh" if config.enable_zsh else "bash"
+        self.unit.status = ops.ActiveStatus(
+            f"Prompt set to {config.environment_type} "
+            f"({config.prompt_color}) for {shells}"
+        )
 
-        self.unit.status = ActiveStatus(f"Prompt set to {env_type} ({color})")
+    def _on_remove(self, _: ops.RemoveEvent) -> None:
+        """Undo every change the charm made outside its own directory."""
+        self.unit.status = ops.MaintenanceStatus("Removing prompt configuration")
+        try:
+            _apply_block(BASH_RC, _bash_snippet(), enabled=False)
+            _apply_block(ZSH_RC, _zsh_snippet(), enabled=False)
+            PROMPT_SCRIPT.unlink(missing_ok=True)
+        except OSError:
+            # Removal must not block teardown; the operator can clean up by hand.
+            logger.exception("Failed to remove prompt configuration")
 
-    def _append_profile(self, file_path, snippet):
-        if os.path.exists(file_path):
-            with open(file_path, "r") as f:
-                if "juju_dynamic_prompt.py" in f.read():
-                    return
-        with open(file_path, "a") as f:
-            f.write(snippet)
+    def _render_script(self, config: PromptConfig) -> str:
+        """Render templates/prompt.py.j2 for the given configuration."""
+        env = Environment(
+            loader=FileSystemLoader(self.charm_dir / "templates"),
+            undefined=StrictUndefined,
+            keep_trailing_newline=True,
+            autoescape=False,  # The output is Python source, not markup.
+        )
+        template = env.get_template("prompt.py.j2")
+        return template.render(
+            environment_type=config.environment_type,
+            prompt_color=config.prompt_color,
+        )
 
-if __name__ == "__main__":
-    main(PromptHighlighterCharm)
+
+def _write_file(path: pathlib.Path, content: str, mode: int) -> None:
+    """Write path atomically, so a live shell never reads a half-written file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.juju-tmp")
+    tmp.write_text(content)
+    tmp.chmod(mode)
+    tmp.replace(path)
+
+
+def _strip_block(text: str) -> str:
+    """Return text with any previously managed block removed."""
+    kept: list[str] = []
+    skipping = False
+    for line in text.splitlines(keepends=True):
+        if not skipping and line.strip() == BLOCK_START:
+            skipping = True
+        elif skipping and line.strip() == BLOCK_END:
+            skipping = False
+        elif not skipping:
+            kept.append(line)
+    return "".join(kept)
+
+
+def _apply_block(path: pathlib.Path, snippet: str, enabled: bool) -> None:
+    """Add, refresh or remove the charm's managed block in a shell profile."""
+    if not path.exists():
+        if not enabled:
+            return
+        logger.info("Creating %s; it did not exist yet", path)
+        original = None
+        body = ""
+    else:
+        original = path.read_text()
+        body = _strip_block(original)
+
+    if enabled:
+        if body and not body.endswith("\n"):
+            body += "\n"
+        body += f"{BLOCK_START}\n{snippet.strip()}\n{BLOCK_END}\n"
+
+    if body != original:
+        _write_file(path, body, 0o644)
+
+
+if __name__ == "__main__":  # pragma: nocover
+    ops.main(PromptHighlighterCharm)
