@@ -29,9 +29,13 @@ description: |
 
 subordinate: true
 
-base: ubuntu@24.04
+# One charm file per base rather than one for all of them: the charm ships a
+# venv built by the base's own Python (3.10 on 22.04, 3.12 on 24.04, 3.14 on
+# 26.04), and compiled wheels in it are tied to that version.
 platforms:
-  amd64:
+  ubuntu@22.04:amd64:
+  ubuntu@24.04:amd64:
+  ubuntu@26.04:amd64:
 
 # A subordinate charm must request container scope on at least one endpoint,
 # otherwise Juju refuses to deploy it.
@@ -65,12 +69,21 @@ config:
 
 parts:
   charm:
-    plugin: charm
+    # uv rather than the charm plugin: charmcraft 4.4 still refuses the charm
+    # plugin on ubuntu@26.04 unless CHARMCRAFT_ENABLE_EXPERIMENTAL_EXTENSIONS is
+    # set, and that would be needed for every base, not just that one. uv builds
+    # the venv from pyproject.toml and the committed uv.lock instead.
+    plugin: uv
     source: .
-    # Exclusion-only filters: everything else is still primed.
+    build-snaps:
+      - astral-uv
+    # The uv plugin stages only src/, lib/ and the venv -- unlike the charm
+    # plugin, which copied the whole project. templates/ has to be asked for by
+    # name, and without it the charm cannot render the prompt script at all.
+    override-build: |
+      craftctl default
+      cp --archive --reflink=auto templates "$CRAFT_PART_INSTALL/templates"
+      cp --archive --reflink=auto LICENSE README.md "$CRAFT_PART_INSTALL/"
     prime:
       - "-**/__pycache__"
       - "-**/*.pyc"
-      - "-tests"
-      - "-tox.ini"
-      - "-pyproject.toml"

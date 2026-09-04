@@ -1,9 +1,31 @@
+# The charm is not an installable package; this file exists so that uv can
+# resolve the charm's runtime dependencies into uv.lock, which the uv part in
+# charmcraft.yaml then installs into the charm's venv.
+[project]
+name = "prompt-highlighter"
+version = "0.1.0"
+# 3.10 is what ubuntu@22.04 ships; the charm code must stay within it.
+requires-python = ">=3.10"
+dependencies = [
+    "ops ~= 3.7",
+    "jinja2 ~= 3.1",
+]
+
+[dependency-groups]
+lint = ["ruff"]
+unit = [
+    "ops[testing]",
+    "pytest",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]
 
 [tool.ruff]
 line-length = 99
-target-version = "py312"
+# The oldest Python the charm runs on, so that no rule rewrites the source into
+# syntax that ubuntu@22.04 cannot parse.
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "D", "UP", "B", "C4", "RUF"]

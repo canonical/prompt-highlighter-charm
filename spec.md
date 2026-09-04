@@ -37,31 +37,31 @@ template, test suite, tooling.
 
 **Method:** all source files were read in full (`src/charm.py` 233 lines,
 `templates/prompt.py.j2`, `tests/unit/test_charm.py`,
-`charmcraft.yaml`, `pyproject.toml`, `tox.ini`, `requirements.txt`). No file in
+`charmcraft.yaml`, `pyproject.toml`, `tox.ini`). No file in
 the tree was left unread, so the observations are complete rather than sampled.
 
-**Out of scope:** the packed `prompt-highlighter_amd64.charm` build artefact
+**Out of scope:** the packed `prompt-highlighter_ubuntu@*-amd64.charm` build artefacts
 (binary, gitignored) and the `.serena/` / `.pytest_cache/` tool directories.
 
 ## 3. Technology stack
 
 | Concern | Choice | Evidence |
 | --- | --- | --- |
-| Charm framework | `ops ~= 3.7` | `requirements.txt:1` |
-| Templating | `jinja2 ~= 3.1`, `StrictUndefined`, autoescape off | `requirements.txt:2`, `src/charm.py:173-178` |
+| Charm framework | `ops ~= 3.7` | `pyproject.toml:10` |
+| Templating | `jinja2 ~= 3.1`, `StrictUndefined`, autoescape off | `pyproject.toml:11`, `src/charm.py:173-178` |
 | Charm format | `charmcraft.yaml` unified (no `metadata.yaml`/`config.yaml`) | `charmcraft.yaml:4-5` |
-| Base / platform | `ubuntu@24.04`, `amd64` only | `charmcraft.yaml:23-25` |
-| Deployment model | subordinate, container-scoped `juju-info` | `charmcraft.yaml:21,29-32` |
-| Tests | `pytest` + `ops.testing` (Scenario), state-transition style | `tox.ini:22-28`, `tests/unit/test_charm.py:14` |
-| Lint/format | `ruff` (line length 99, py312, `E,F,W,I,N,D,UP,B,C4,RUF`) | `pyproject.toml:4-13` |
+| Base / platform | `ubuntu@22.04`, `ubuntu@24.04`, `ubuntu@26.04`; `amd64` only. One charm file per base, since each ships a venv built by that series' Python (3.10/3.12/3.14) | `charmcraft.yaml:32-38` |
+| Deployment model | subordinate, container-scoped `juju-info` | `charmcraft.yaml:30,42-45` |
+| Tests | `pytest` + `ops.testing` (Scenario), state-transition style, synced from `uv.lock` | `tox.ini:26-30`, `tests/unit/test_charm.py:14` |
+| Lint/format | `ruff` (line length 99, py310 — the oldest supported base, `E,F,W,I,N,D,UP,B,C4,RUF`) | `pyproject.toml:24-35` |
 | Runtime deps on the unit | none — no packages installed, no network access | absence of any `apt`/`subprocess` call in `src/charm.py` |
 
 ## 4. Repository layout
 
 ```
 charmcraft.yaml          charm metadata + config schema + build parts
-requirements.txt         runtime deps vendored into the charm
-pyproject.toml           pytest + ruff configuration
+pyproject.toml           runtime deps (vendored into the charm) + pytest/ruff config
+uv.lock                  pinned resolution the charm venv and the tests both use
 tox.ini                  lint / unit environments
 src/charm.py             the operator: validation, rendering, file management
 templates/prompt.py.j2   the artefact rendered onto the unit

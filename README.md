@@ -90,9 +90,20 @@ touched.
 ```bash
 charmcraft pack
 juju deploy ubuntu
-juju deploy ./prompt-highlighter_amd64.charm
+juju deploy ./prompt-highlighter_ubuntu@24.04-amd64.charm
 juju integrate prompt-highlighter ubuntu
 ```
+
+`charmcraft pack` builds one charm file per base — `ubuntu@22.04`, `ubuntu@24.04`
+and `ubuntu@26.04`, amd64 — so deploy the one matching the base of the machines
+its principal runs on. A subordinate has to share its principal's base.
+
+```bash
+charmcraft pack --platform ubuntu@22.04:amd64   # just the one you need
+```
+
+Each file ships a virtual environment built by that series' own Python (3.10,
+3.12 and 3.14 respectively), which is why they are not interchangeable.
 
 Configure it:
 
@@ -172,5 +183,12 @@ their old prompt until they are restarted.
 ```bash
 tox -e lint          # ruff
 tox -e unit          # pytest against ops.testing (Scenario)
-charmcraft pack      # build the .charm
+charmcraft pack      # build one .charm per base
 ```
+
+Runtime dependencies live in `pyproject.toml` and are pinned in `uv.lock`, which
+is committed. `charmcraft pack` installs the charm's venv from that lock, and the
+tox environments sync from it too, so the tests run against what gets shipped.
+Change a dependency with `uv add` / `uv lock` and commit the lock alongside it.
+Keep the charm code within Python 3.10: that is what `ubuntu@22.04` ships, and
+`requires-python`/ruff's `target-version` are set to match.
