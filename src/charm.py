@@ -106,8 +106,7 @@ class PromptConfig:
         prompt_color = typing.cast(str, config["prompt-color"]).strip().lower()
         if prompt_color not in VALID_COLORS:
             raise ConfigError(
-                f"invalid prompt-color {prompt_color!r}: expected one of "
-                f"{', '.join(VALID_COLORS)}"
+                f"invalid prompt-color {prompt_color!r}: expected one of {', '.join(VALID_COLORS)}"
             )
 
         return cls(
@@ -121,6 +120,7 @@ class PromptHighlighterCharm(ops.CharmBase):
     """Keep the on-disk prompt configuration in sync with the Juju config."""
 
     def __init__(self, framework: ops.Framework):
+        """Observe every event that can change what belongs on disk."""
         super().__init__(framework)
         for event in (
             self.on.install,

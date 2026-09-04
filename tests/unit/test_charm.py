@@ -301,15 +301,22 @@ def test_unknown_segments_are_omitted_not_blank(ctx, fs, tmp_path):
 
 
 def test_two_subordinate_units_on_one_machine_list_both_principals(fs, tmp_path):
-    """Juju runs one subordinate unit per principal unit, so a machine hosting
-    two principals hosts two of our units, both writing the same files."""
+    """Juju runs one subordinate unit per principal unit.
+
+    A machine hosting two principals hosts two of our units, both writing the
+    same files.
+    """
     nova = testing.SubordinateRelation(
-        endpoint="juju-info", interface="juju-info",
-        remote_app_name="nova-compute", remote_unit_id=0,
+        endpoint="juju-info",
+        interface="juju-info",
+        remote_app_name="nova-compute",
+        remote_unit_id=0,
     )
     ceph = testing.SubordinateRelation(
-        endpoint="juju-info", interface="juju-info",
-        remote_app_name="ceph-osd", remote_unit_id=2,
+        endpoint="juju-info",
+        interface="juju-info",
+        remote_app_name="ceph-osd",
+        remote_unit_id=2,
     )
     run(make_ctx(unit_id=0), relations=(nova,))
     run(make_ctx(unit_id=1), relations=(ceph,))
@@ -326,8 +333,10 @@ def test_long_principal_list_is_capped(fs, tmp_path):
     """The noisiest field is the one least worth the columns."""
     for index, app in enumerate(("ceph-osd", "nova-compute", "ovn-chassis", "telegraf")):
         relation = testing.SubordinateRelation(
-            endpoint="juju-info", interface="juju-info",
-            remote_app_name=app, remote_unit_id=index,
+            endpoint="juju-info",
+            interface="juju-info",
+            remote_app_name=app,
+            remote_unit_id=index,
         )
         run(make_ctx(unit_id=index), relations=(relation,))
 
@@ -340,9 +349,7 @@ def test_long_principal_list_is_capped(fs, tmp_path):
 def test_separator_falls_back_to_ascii_when_the_locale_cannot_encode_it(ctx, fs, tmp_path):
     run(ctx)
 
-    out = strip_escapes(
-        render_prompt(fs["script"], "bash", tmp_path, PYTHONIOENCODING="ascii")
-    )
+    out = strip_escapes(render_prompt(fs["script"], "bash", tmp_path, PYTHONIOENCODING="ascii"))
 
     assert "\u00b7" not in out
     assert f"staging-mdl - ubuntu/3 - {HOSTNAME}" in out
@@ -350,8 +357,10 @@ def test_separator_falls_back_to_ascii_when_the_locale_cannot_encode_it(ctx, fs,
 
 def test_removing_one_unit_keeps_the_prompt_for_its_sibling(fs, tmp_path):
     other = testing.SubordinateRelation(
-        endpoint="juju-info", interface="juju-info",
-        remote_app_name="ceph-osd", remote_unit_id=2,
+        endpoint="juju-info",
+        interface="juju-info",
+        remote_app_name="ceph-osd",
+        remote_unit_id=2,
     )
     run(make_ctx(unit_id=0), relations=(PRINCIPAL,))
     run(make_ctx(unit_id=1), relations=(other,))
@@ -409,3 +418,118 @@ def test_generated_script_escapes_prompt_metacharacters(ctx, fs, tmp_path):
 
     assert "100%%_back\\slash" in zsh
     assert "100%_back\\\\slash" in bash
+
+
+# A prompt string is re-expanded by the shell on every draw, so anything the
+# charm puts in it that a local user can name is an execution vector.
+INJECTIONS = [
+    "$(touch pwned)",
+    "`touch pwned`",
+    "${IFS}",
+    "$USER",
+]
+
+
+@pytest.mark.parametrize("payload", INJECTIONS)
+def test_bash_prompt_does_not_expand_hostile_directory_names(ctx, fs, tmp_path, payload):
+    """Any user can create a directory; only its name should reach the prompt.
+
+    Left unescaped, a `cd` into a directory named `$(...)` runs it as whoever
+    is at the keyboard, the next time the prompt is drawn.
+    """
+    run(ctx)
+    hostile = tmp_path / payload
+    hostile.mkdir()
+
+    out = render_prompt(fs["script"], "bash", hostile)
+
+    expanded = subprocess.run(
+        ["bash", "-c", 'PS1="$1"; printf "%s" "${PS1@P}"', "_", out],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        check=True,
+    ).stdout
+    assert not (tmp_path / "pwned").exists()
+    # And the name is still shown as it was written, not swallowed.
+    assert payload in expanded
+
+
+@pytest.mark.parametrize(
+    ("payload", "shown"),
+    [
+        ("$(touch pwned)", "?(touch pwned)"),
+        ("`touch pwned`", "?touch pwned?"),
+        ("${IFS}", "?{IFS}"),
+        ("$USER", "?USER"),
+    ],
+)
+def test_zsh_prompt_carries_no_expandable_text(ctx, fs, tmp_path, payload, shown):
+    """Check that nothing zsh could expand survives into the prompt.
+
+    Zsh expands $ and ` only under PROMPT_SUBST, which is the operator's own
+    setting and unknowable here, so neither may reach the prompt at all.
+    """
+    run(ctx)
+    hostile = tmp_path / payload
+    hostile.mkdir()
+
+    # The last two fields of the cursor line are the symbol and its space.
+    out = strip_escapes(render_prompt(fs["script"], "zsh", hostile))
+    path = out.split("\n")[1].rsplit(" ", 2)[0]
+
+    assert path == f"ubuntu {hostile.parent}/{shown}"
+
+
+@pytest.mark.parametrize(
+    ("name", "shown"),
+    [
+        ("a\033[2Jb", "a?[2Jb"),
+        # C1: some terminals still decode U+0080-U+009F as control sequences.
+        ("a\u009bBc", "a?Bc"),
+    ],
+)
+def test_control_characters_never_reach_the_terminal(ctx, fs, tmp_path, name, shown):
+    """A directory name can hold an escape sequence; the prompt may not pass it on."""
+    run(ctx)
+    hostile = tmp_path / name
+    hostile.mkdir()
+
+    out = render_prompt(fs["script"], "bash", hostile)
+
+    assert "\033[2J" not in out
+    assert "\u009b" not in out
+    assert shown in strip_escapes(out)
+
+
+def test_backslashes_in_a_path_are_not_read_as_bash_prompt_escapes(ctx, fs, tmp_path):
+    r"""Bash decodes \u, \h and \w in a prompt; a path containing them is text."""
+    run(ctx)
+    hostile = tmp_path / r"\u\h\w"
+    hostile.mkdir()
+
+    out = render_prompt(fs["script"], "bash", hostile)
+
+    expanded = subprocess.run(
+        ["bash", "-c", 'PS1="$1"; printf "%s" "${PS1@P}"', "_", out],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert r"\u\h\w" in expanded
+
+
+def test_a_hostile_username_cannot_run_commands(ctx, fs, tmp_path):
+    """$USER is read from the environment, which the charm does not control."""
+    run(ctx)
+
+    out = render_prompt(fs["script"], "bash", tmp_path, USER="$(touch pwned)")
+
+    subprocess.run(
+        ["bash", "-c", 'PS1="$1"; printf "%s" "${PS1@P}"', "_", out],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        check=True,
+    )
+    assert not (tmp_path / "pwned").exists()

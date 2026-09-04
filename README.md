@@ -42,6 +42,10 @@ Pick `prompt-color=grey` for development. A badge only means something if the
 unremarkable environments look unremarkable; if every prompt shouts, none of them
 does.
 
+> **The prompt is advisory, not a control.** It makes a wrong terminal *look*
+> wrong; it authenticates nobody and prevents no command. Keep your real
+> controls independent of it.
+
 ## The window title
 
 The same context is written to the terminal window title:
@@ -177,6 +181,14 @@ one shared script.
 
 Changes apply to shells started after the config change — existing sessions keep
 their old prompt until they are restarted.
+
+## Security
+
+One control is worth knowing about from the outside: a shell re-expands its
+prompt on every draw, so anything variable that reaches it — a directory name,
+`$USER`, a hostname — could otherwise be *executed* as whoever is at the
+keyboard. The generated script neutralises command substitution and strips
+control characters before either can happen, per shell.
 
 ## Development
 

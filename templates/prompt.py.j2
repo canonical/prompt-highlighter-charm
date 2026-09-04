@@ -80,12 +80,40 @@ def glyphs():
     return preferred
 
 
+def printable(char):
+    """Return True for a character that is safe to send to a terminal.
+
+    Excludes the C0 controls and DEL, and the C1 range, which some terminals
+    still decode as control sequences even under a UTF-8 locale.
+    """
+    return " " <= char != "\x7f" and not ("\x80" <= char <= "\x9f")
+
+
 def quote(text, shell):
-    """Escape characters the shell would otherwise expand inside the prompt."""
+    """Make text safe to place inside a shell prompt string.
+
+    A prompt string is re-expanded by the shell every time the prompt is drawn,
+    so a ``$(...)`` or a backtick arriving from a directory name, a hostname or
+    $USER would be *executed*, as whoever is at the keyboard. Anyone who can
+    create a directory can therefore name it into a command that runs the
+    moment root cd's into it. Control characters would likewise reach the
+    terminal as escape sequences rather than as text. Neither gets through.
+    """
+    text = "".join(char if printable(char) else "?" for char in text)
     if shell == "bash":
-        return text.replace("\\", "\\\\")
+        # Bash decodes backslash escapes first and expands the result second,
+        # so a literal "$" has to reach the expansion step as "\$", which means
+        # writing it here as "\\$". Doubling the backslashes comes first, or it
+        # would double the ones added for "$" and "`" as well.
+        text = text.replace("\\", "\\\\")
+        return text.replace("$", "\\\\$").replace("`", "\\\\`")
     if shell == "zsh":
-        return text.replace("%", "%%")
+        # Zsh expands "$" and "`" only when PROMPT_SUBST is set, which is the
+        # operator's own choice and unknowable here, and the backslash that
+        # would neutralise them shows up literally when it is not set.
+        # Replacing them is the only answer that is right either way.
+        text = text.replace("%", "%%")
+        return text.replace("$", "?").replace("`", "?")
     return text
 
 
@@ -163,10 +191,10 @@ def window_title_text(fields, separator):
     """
     if os.environ.get("TERM", "") in TITLELESS_TERMS:
         return ""
-    text = "[" + ENVIRONMENT_LABEL.upper() + "] " + separator.join(fields)
-    # A control character here would end the sequence early and spill the rest
-    # of the title onto the screen as literal text.
-    return "".join(char for char in text if char >= " " and char != "\x7f")
+    # Control characters would end the sequence early and spill the rest of the
+    # title onto the screen as literal text; quote() takes them out on the way
+    # into the prompt, along with everything the shell would expand.
+    return "[" + ENVIRONMENT_LABEL.upper() + "] " + separator.join(fields)
 
 
 def render(shell, exit_status):
