@@ -38,19 +38,28 @@ ZSH_RC = pathlib.Path("/etc/zsh/zshrc")
 BLOCK_START = "# BEGIN prompt-highlighter charm (managed) -- do not edit"
 BLOCK_END = "# END prompt-highlighter charm"
 
-VALID_COLORS = ("red", "green", "yellow", "blue", "magenta", "cyan", "white")
+# The colour of the environment badge. "grey" exists so that a development
+# environment can be given a deliberately boring badge -- an unremarkable dev
+# prompt is what leaves the red production one its meaning.
+VALID_COLORS = ("red", "green", "yellow", "blue", "magenta", "cyan", "white", "grey")
 ENV_LABEL = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9 _.:@+-]{0,31}$")
 
 
 def _bash_snippet() -> str:
-    """Return the Bash profile snippet that installs the prompt hook."""
+    """Return the Bash profile snippet that installs the prompt hook.
+
+    The hook is prepended to any existing PROMPT_COMMAND rather than appended,
+    so that it still sees the exit status of the operator's own last command
+    and can flag a failure in the prompt.
+    """
     return f"""\
 case $- in
     *i*) ;;
     *) return ;;
 esac
 _juju_prompt_highlighter() {{
-    PS1="$({PROMPT_SCRIPT} bash)"
+    local status=$?
+    PS1="$({PROMPT_SCRIPT} bash $status)"
 }}
 case "$PROMPT_COMMAND" in
     *_juju_prompt_highlighter*) ;;
@@ -64,7 +73,8 @@ def _zsh_snippet() -> str:
     """Return the Zsh profile snippet that installs the prompt hook."""
     return f"""\
 _juju_prompt_highlighter() {{
-    PROMPT="$({PROMPT_SCRIPT} zsh)"
+    local status=$?
+    PROMPT="$({PROMPT_SCRIPT} zsh $status)"
 }}
 autoload -Uz add-zsh-hook
 add-zsh-hook precmd _juju_prompt_highlighter

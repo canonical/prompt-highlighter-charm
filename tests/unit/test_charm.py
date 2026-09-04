@@ -168,19 +168,44 @@ def test_config_values_are_normalised(ctx, fs):
 
 
 def strip_escapes(prompt: str) -> str:
-    """Drop the colour codes and their zero-width markers, keeping the text."""
+    """Drop the colour codes, the window title and their zero-width markers."""
+    prompt = re.sub(r"\033\][0-9]*;[^\007]*\007", "", prompt)
     return re.sub(r"\\\[|\\\]|%\{|%\}|\033\[[0-9;]*m", "", prompt)
 
 
-def render_prompt(script: pathlib.Path, shell: str, cwd: pathlib.Path) -> str:
+def window_title(prompt: str) -> str | None:
+    """Return the text of the OSC window-title sequence, or None if there is none."""
+    match = re.search(r"\033\]0;([^\007]*)\007", prompt)
+    return match.group(1) if match else None
+
+
+def render_prompt(script, shell, cwd, status=0, term="xterm-256color", **overrides):
+    env = {
+        "USER": "ubuntu",
+        "HOME": "/home/ubuntu",
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+    }
+    if term is not None:
+        env["TERM"] = term
+    env.update(overrides)
     return subprocess.run(
-        [sys.executable, str(script), shell],
+        [sys.executable, str(script), shell, str(status)],
         cwd=cwd,
         capture_output=True,
         text=True,
         check=True,
-        env={"USER": "ubuntu", "HOME": "/home/ubuntu", "PATH": "/usr/bin:/bin"},
+        env=env,
     ).stdout
+
+
+# The prompt symbol tracks the effective user, so the expectation has to as well.
+SYMBOL = "#" if os.geteuid() == 0 else "$"
+HOSTNAME = os.uname().nodename
+
+
+def context_line(prompt: str) -> str:
+    return strip_escapes(prompt).split("\n")[0]
 
 
 def test_script_records_model_and_principal_unit(ctx, fs):
@@ -211,22 +236,68 @@ def test_relation_joined_refreshes_the_principal_unit(ctx, fs):
     assert isinstance(out.unit_status, ops.ActiveStatus)
 
 
-def test_prompt_shows_env_model_unit_and_hostname(ctx, fs, tmp_path):
+def test_prompt_puts_context_above_and_the_cursor_on_its_own_line(ctx, fs, tmp_path):
     run(ctx, config={"environment-type": "production", "prompt-color": "red"})
 
     out = strip_escapes(render_prompt(fs["script"], "bash", tmp_path))
-    hostname = os.uname().nodename
+    context, cursor = out.split("\n")
 
-    assert out == f"[PRODUCTION] - staging-mdl - ubuntu/3 - {hostname} ubuntu:{tmp_path}$ "
+    assert context == f" PRODUCTION  staging-mdl \u00b7 ubuntu/3 \u00b7 {HOSTNAME}"
+    assert cursor == f"ubuntu {tmp_path} {SYMBOL} "
+
+
+def test_environment_badge_is_a_filled_block_not_bracketed_text(ctx, fs, tmp_path):
+    run(ctx, config={"environment-type": "production", "prompt-color": "red"})
+
+    out = render_prompt(fs["script"], "bash", tmp_path)
+
+    # 41 is the red *background*: the label reads as a block before it is read
+    # as text, and it survives on a monochrome terminal as reverse video.
+    assert "\033[41m" in out
+    assert "[PRODUCTION]" not in strip_escapes(out)
+
+
+def test_grey_badge_lets_development_recede(ctx, fs, tmp_path):
+    run(ctx, config={"environment-type": "development", "prompt-color": "grey"})
+
+    assert "\033[100m" in render_prompt(fs["script"], "bash", tmp_path)
+
+
+def test_window_title_carries_the_context(ctx, fs, tmp_path):
+    run(ctx, config={"environment-type": "production"})
+
+    title = window_title(render_prompt(fs["script"], "bash", tmp_path))
+
+    assert title == f"[PRODUCTION] staging-mdl \u00b7 ubuntu/3 \u00b7 {HOSTNAME}"
+
+
+@pytest.mark.parametrize("term", ["linux", "dumb", "", None])
+def test_no_window_title_where_there_is_no_title_bar(ctx, fs, tmp_path, term):
+    run(ctx)
+
+    out = render_prompt(fs["script"], "bash", tmp_path, term=term)
+
+    assert window_title(out) is None
+    assert "\033]" not in out
+
+
+def test_failed_command_is_flagged_on_the_context_line(ctx, fs, tmp_path):
+    run(ctx)
+
+    ok = context_line(render_prompt(fs["script"], "bash", tmp_path, status=0))
+    failed = context_line(render_prompt(fs["script"], "bash", tmp_path, status=2))
+
+    assert "\u2717" not in ok
+    assert failed.endswith("\u2717 2")
 
 
 def test_unknown_segments_are_omitted_not_blank(ctx, fs, tmp_path):
     run(ctx, event="install", relations=())
 
-    out = strip_escapes(render_prompt(fs["script"], "bash", tmp_path))
+    context = context_line(render_prompt(fs["script"], "bash", tmp_path))
 
-    assert " -  - " not in out
-    assert out.startswith(f"[DEVELOPMENT] - staging-mdl - {os.uname().nodename} ")
+    assert " \u00b7  \u00b7 " not in context
+    assert context == f" DEVELOPMENT  staging-mdl \u00b7 {HOSTNAME}"
 
 
 def test_two_subordinate_units_on_one_machine_list_both_principals(fs, tmp_path):
@@ -248,7 +319,33 @@ def test_two_subordinate_units_on_one_machine_list_both_principals(fs, tmp_path)
         "prompt-highlighter-1",
     ]
     out = strip_escapes(render_prompt(fs["script"], "bash", tmp_path))
-    assert "- ceph-osd/2,nova-compute/0 -" in out
+    assert "\u00b7 ceph-osd/2,nova-compute/0 \u00b7" in out
+
+
+def test_long_principal_list_is_capped(fs, tmp_path):
+    """The noisiest field is the one least worth the columns."""
+    for index, app in enumerate(("ceph-osd", "nova-compute", "ovn-chassis", "telegraf")):
+        relation = testing.SubordinateRelation(
+            endpoint="juju-info", interface="juju-info",
+            remote_app_name=app, remote_unit_id=index,
+        )
+        run(make_ctx(unit_id=index), relations=(relation,))
+
+    out = strip_escapes(render_prompt(fs["script"], "bash", tmp_path))
+
+    assert "ceph-osd/0,nova-compute/1 +2 more" in out
+    assert "ovn-chassis" not in out
+
+
+def test_separator_falls_back_to_ascii_when_the_locale_cannot_encode_it(ctx, fs, tmp_path):
+    run(ctx)
+
+    out = strip_escapes(
+        render_prompt(fs["script"], "bash", tmp_path, PYTHONIOENCODING="ascii")
+    )
+
+    assert "\u00b7" not in out
+    assert f"staging-mdl - ubuntu/3 - {HOSTNAME}" in out
 
 
 def test_removing_one_unit_keeps_the_prompt_for_its_sibling(fs, tmp_path):
@@ -269,7 +366,7 @@ def test_removing_one_unit_keeps_the_prompt_for_its_sibling(fs, tmp_path):
     assert fs["script"].exists()
     assert charm_module.BLOCK_START in fs["bashrc"].read_text()
     out = strip_escapes(render_prompt(fs["script"], "bash", tmp_path))
-    assert "- ceph-osd/2 -" in out
+    assert "\u00b7 ceph-osd/2 \u00b7" in out
 
 
 def test_last_unit_off_the_machine_cleans_everything(ctx, fs):
@@ -287,9 +384,9 @@ def test_generated_script_wraps_escapes_for_bash(ctx, fs, tmp_path):
 
     out = render_prompt(fs["script"], "bash", tmp_path)
 
-    assert out.startswith("\\[\033[0;31m\\]")
-    assert out.endswith("\\[\033[0m\\]")
-    assert "[PRODUCTION] - staging-mdl - ubuntu/3 - " in out
+    assert out.startswith("\\[\033]0;")
+    assert out.endswith("\\[\033[0m\\] ")
+    assert " PRODUCTION  staging-mdl \u00b7 ubuntu/3 \u00b7 " in strip_escapes(out)
 
 
 def test_generated_script_wraps_escapes_for_zsh(ctx, fs, tmp_path):
@@ -297,9 +394,9 @@ def test_generated_script_wraps_escapes_for_zsh(ctx, fs, tmp_path):
 
     out = render_prompt(fs["script"], "zsh", tmp_path)
 
-    assert out.startswith("%{\033[0;34m%}")
-    assert out.endswith("%{\033[0m%}")
-    assert "[STAGING] - staging-mdl - ubuntu/3 - " in out
+    assert out.startswith("%{\033]0;")
+    assert out.endswith("%{\033[0m%} ")
+    assert " STAGING  staging-mdl \u00b7 ubuntu/3 \u00b7 " in strip_escapes(out)
 
 
 def test_generated_script_escapes_prompt_metacharacters(ctx, fs, tmp_path):

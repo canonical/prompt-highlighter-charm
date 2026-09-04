@@ -12,8 +12,12 @@ description: |
 
   It renders /usr/local/bin/juju_dynamic_prompt.py from the charm's template and
   installs a managed snippet into the system-wide Bash profile (and optionally the
-  Zsh profile), so every interactive shell on the unit shows the configured
-  environment label in the configured colour.
+  Zsh profile), so every interactive shell on the unit gets a two-line prompt: the
+  environment as a reverse-video badge alongside the model, principals and host,
+  then the cursor on a line of its own with the full terminal width to type in.
+
+  The same context is written to the terminal window title, which follows an ssh
+  or a `juju ssh` back to the operator's own terminal.
 
   Everything the charm writes is delimited by managed markers and is removed again
   when the charm is removed or when the corresponding option is disabled.
@@ -49,8 +53,9 @@ config:
       type: string
       default: "green"
       description: >
-        Primary ANSI colour for the prompt. One of: red, green, yellow, blue,
-        magenta, cyan, white.
+        Background colour of the environment badge. One of: red, green, yellow,
+        blue, magenta, cyan, white, grey. Pick grey for development: a badge
+        only means something if the unremarkable environments look unremarkable.
     enable-zsh:
       type: boolean
       default: true

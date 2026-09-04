@@ -1,1 +1,2 @@
 *.charm
+__pycache__/
