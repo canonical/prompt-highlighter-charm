@@ -44,6 +44,16 @@ BLOCK_END = "# END prompt-highlighter charm"
 VALID_COLORS = ("red", "green", "yellow", "blue", "magenta", "cyan", "white", "grey")
 LABEL_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9 _.:@+-]{0,31}$")
 
+# The placeholders a prompt template may use. Each is resolved by the generated
+# script: the model is baked in at render time, the other two are read at
+# prompt time. Everything in the template that is not a placeholder is shown
+# as written.
+TEMPLATE_FIELDS = ("model", "units", "hostname")
+TEMPLATE_MAX_LENGTH = 128
+# "$name" or "${name}". A "$" that starts neither is matched with both groups
+# empty, so that it can be reported rather than silently shown.
+PLACEHOLDER_PATTERN = re.compile(r"\$(?:\{(\w+)\}|(\w+))?")
+
 
 def _bash_snippet() -> str:
     """Return the Bash profile snippet that installs the prompt hook.
@@ -92,6 +102,8 @@ class PromptConfig:
     label: str
     color: str
     enable_zsh: bool
+    template: str
+    multi_line: bool
 
     @classmethod
     def load(cls, config: ops.ConfigData) -> "PromptConfig":
@@ -112,7 +124,42 @@ class PromptConfig:
             label=label,
             color=color,
             enable_zsh=typing.cast(bool, config["enable-zsh"]),
+            template=_validate_template(typing.cast(str, config["prompt-template"])),
+            multi_line=typing.cast(bool, config["multi-line"]),
         )
+
+
+def _validate_template(template: str) -> str:
+    """Return the stripped prompt template, raising ConfigError if unusable.
+
+    The template is embedded in the generated script as a string literal and
+    every part of it is shell-quoted on the way into the prompt, so the checks
+    here are about catching mistakes early with a message that names them,
+    not about safety.
+    """
+    template = template.strip()
+    expected = ", ".join(f"${name}" for name in TEMPLATE_FIELDS[:-1])
+    expected += f" or ${TEMPLATE_FIELDS[-1]}"
+    if len(template) > TEMPLATE_MAX_LENGTH:
+        raise ConfigError(
+            f"invalid prompt-template: at most {TEMPLATE_MAX_LENGTH} characters allowed"
+        )
+    for char in template:
+        # The same definition the generated script uses: C0 and DEL, and the C1
+        # range that some terminals still decode as control sequences.
+        if char < " " or char == "\x7f" or "\x80" <= char <= "\x9f":
+            raise ConfigError(
+                f"invalid prompt-template: control character {char!r} is not allowed"
+            )
+    for match in PLACEHOLDER_PATTERN.finditer(template):
+        name = match.group(1) or match.group(2)
+        if name is None:
+            raise ConfigError(f"invalid prompt-template: stray $; write {expected}")
+        if name not in TEMPLATE_FIELDS:
+            raise ConfigError(
+                f"invalid prompt-template: unknown placeholder ${name}; expected {expected}"
+            )
+    return template
 
 
 class PromptHighlighterCharm(ops.CharmBase):
@@ -163,9 +210,10 @@ class PromptHighlighterCharm(ops.CharmBase):
             return
 
         shells = "bash and zsh" if config.enable_zsh else "bash"
+        layout = "two-line" if config.multi_line else "one-line"
         alongside = f" on {principal}" if principal else ""
         self.unit.status = ops.ActiveStatus(
-            f"Prompt set to {config.label} ({config.color}) for {shells}{alongside}"
+            f"Prompt set to {config.label} ({config.color}, {layout}) for {shells}{alongside}"
         )
 
     def _on_remove(self, _: ops.RemoveEvent) -> None:
@@ -220,6 +268,8 @@ class PromptHighlighterCharm(ops.CharmBase):
         return template.render(
             label=config.label,
             color=config.color,
+            prompt_template=config.template,
+            multi_line=config.multi_line,
             juju_model=self.model.name,
             principal_dir=str(PRINCIPAL_DIR),
         )

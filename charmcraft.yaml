@@ -12,9 +12,11 @@ description: |
 
   It renders /usr/local/bin/juju_dynamic_prompt.py from the charm's template and
   installs a managed snippet into the system-wide Bash profile (and optionally the
-  Zsh profile), so every interactive shell on the unit gets a two-line prompt: the
-  label as a reverse-video badge alongside the model, principals and host, then
-  the cursor on a line of its own with the full terminal width to type in.
+  Zsh profile), so every interactive shell on the unit gets a prompt showing the
+  label as a reverse-video badge alongside the model, principals and host, laid
+  out as the prompt-template option says. By default the cursor then goes on a
+  line of its own with the full terminal width to type in; multi-line=false puts
+  it on the same line instead.
 
   The same context is written to the terminal window title, which follows an ssh
   or a `juju ssh` back to the operator's own terminal.
@@ -66,6 +68,25 @@ config:
       description: >
         If true, configure the global Zsh profile in addition to Bash. Setting
         this back to false removes the Zsh configuration again.
+    prompt-template:
+      type: string
+      default: "$model · $units · $hostname"
+      description: >
+        How the context after the badge is laid out. $model, $units and
+        $hostname (or ${model} etc.) are replaced by the Juju model, the
+        principal unit(s) on this machine and the hostname; everything else is
+        shown as written, so the text between the placeholders is the
+        separator. At most 128 characters, no control characters. A field that
+        is empty -- the units before the juju-info relation has joined -- is
+        dropped together with the text before it. An empty template leaves
+        just the badge.
+    multi-line:
+      type: boolean
+      default: true
+      description: >
+        If true, the badge and the context go on one line and the cursor
+        (user, directory and prompt symbol) on the next. If false, everything
+        is on a single line.
 
 parts:
   charm:

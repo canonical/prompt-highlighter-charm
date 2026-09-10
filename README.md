@@ -1,9 +1,9 @@
 # prompt-highlighter
 
 A Juju **subordinate** charm that gives every interactive shell on a machine a
-two-line prompt saying which environment, model, principal unit and host you are
-logged into — so that a `systemctl stop` typed into the wrong terminal is visibly
-wrong before Enter is pressed.
+prompt saying which environment, model, principal unit and host you are logged
+into — so that a `systemctl stop` typed into the wrong terminal is visibly wrong
+before Enter is pressed.
 
 ```
  PRODUCTION  prod-openstack · nova-compute/3 · juju-a1b2c3-7
@@ -16,10 +16,11 @@ read, and it still reads as inverted on a terminal with no colour at all, which
 bracketed text does not. Everything after the badge is deliberately quieter, and
 the principal list — the longest field and the least urgent — is quietest of all.
 
-The cursor gets a line to itself, so the whole terminal width is yours to type in
-and your commands stay left-aligned in the scrollback. Nine columns are spent
-before the cursor, against seventy-nine for a single-line prompt carrying the
-same five facts.
+By default the cursor gets a line to itself, so the whole terminal width is
+yours to type in and your commands stay left-aligned in the scrollback. Nine
+columns are spent before the cursor, against seventy-nine for a single-line
+prompt carrying the same five facts. Both the layout of the context and the
+line break are yours to change; see [Choosing the layout](#choosing-the-layout).
 
 | Segment | Source | Resolved |
 | --- | --- | --- |
@@ -45,6 +46,51 @@ does.
 > **The prompt is advisory, not a control.** It makes a wrong terminal *look*
 > wrong; it authenticates nobody and prevents no command. Keep your real
 > controls independent of it.
+
+## Choosing the layout
+
+Everything after the badge is laid out by `prompt-template`. `$model`, `$units`
+and `$hostname` (or `${model}` and so on) are replaced by the Juju model, the
+principal units on the machine and the hostname; everything else is shown as
+written, so the text between the placeholders is the separator:
+
+```bash
+juju config prompt-highlighter prompt-template='$model / $units - $hostname'
+```
+
+```
+ PRODUCTION  prod-openstack / nova-compute/3 - juju-a1b2c3-7
+root ~ #
+```
+
+Quote the value with single quotes, or your own shell expands `$model` before
+Juju ever sees it. The default is `$model · $units · $hostname`. Each field keeps
+its own colour and the literal text takes the dim separator colour, so
+`'$hostname [$model] $units'` and `'${units}@${hostname}'` are equally readable.
+The window title follows the same template. An empty template leaves just the
+badge.
+
+A field with nothing to show — the units, before the `juju-info` relation has
+joined — disappears together with the text between it and the previous field
+(or the next one, when it comes first), so `$model / $units - $hostname`
+renders as `prod-openstack - juju-a1b2c3-7` rather than leaving a `/ -` gap.
+
+A placeholder the charm does not know, a bare `$`, a control character or more
+than 128 characters puts the unit into `blocked` with a message saying which.
+
+`multi-line=false` puts the cursor on the same line as the context, for
+operators who prefer the traditional shape:
+
+```bash
+juju config prompt-highlighter multi-line=false
+```
+
+```
+ PRODUCTION  prod-openstack · nova-compute/3 · juju-a1b2c3-7 root ~ #
+```
+
+The failed-command mark, when there is one, sits between the context and the
+cursor in either layout.
 
 ## The window title
 
@@ -73,8 +119,8 @@ Two things to know:
 1. `config-changed` (and `juju-info-relation-joined`) writes this unit's
    principal name to `/var/lib/juju-prompt-highlighter/principals/<unit>`, then
    renders `templates/prompt.py.j2` into
-   `/usr/local/bin/juju_dynamic_prompt.py`, baking in the configured label
-   and colour and the Juju model name.
+   `/usr/local/bin/juju_dynamic_prompt.py`, baking in the configured label,
+   colour, template and layout and the Juju model name.
 2. The charm installs a *managed block* into `/etc/bash.bashrc` (and
    `/etc/zsh/zshrc` when `enable-zsh` is true) that calls that script to build
    the prompt before each command, passing it the exit status of the command you
@@ -114,6 +160,8 @@ Configure it:
 ```bash
 juju config prompt-highlighter label=production color=red
 juju config prompt-highlighter label=development color=grey
+juju config prompt-highlighter prompt-template='$hostname ($model) $units'
+juju config prompt-highlighter multi-line=false
 juju config prompt-highlighter enable-zsh=false
 ```
 
@@ -121,9 +169,11 @@ juju config prompt-highlighter enable-zsh=false
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `label` | string | `development` | Text shown in the badge. 1-32 characters from `[A-Za-z0-9 _.:@+-]`, starting with a letter, digit or underscore. |
+| `label` | string | `eu-west-prod` | Text shown in the badge. 1-32 characters from `[A-Za-z0-9 _.:@+-]`, starting with a letter, digit or underscore. |
 | `color` | string | `green` | Badge background: `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `grey`. |
 | `enable-zsh` | boolean | `true` | Also configure `/etc/zsh/zshrc`. |
+| `prompt-template` | string | `$model · $units · $hostname` | Layout of the context after the badge. `$model`, `$units` and `$hostname` are replaced; everything else is literal. At most 128 characters, no control characters. |
+| `multi-line` | boolean | `true` | Cursor on its own line below the context. `false` keeps everything on one line. |
 
 An invalid value puts the unit into `blocked` with a message naming the offending
 option; the on-disk configuration is left untouched until it is corrected.
@@ -136,7 +186,8 @@ re-run `juju config prompt-highlighter label=... color=...`.
 Badge backgrounds use the basic ANSI codes so they land correctly on any
 terminal; the dimmer context colours use the 256-colour palette. Where the
 locale cannot encode `·` and `✗`, the script falls back to `-` and `x` rather
-than printing replacement characters into every prompt.
+than printing replacement characters into every prompt; any other character in
+the template that the locale cannot carry is shown as `?`.
 
 ## Multiple principals on one machine
 
@@ -181,8 +232,8 @@ gap appears.
 
 Two known limits: a unit whose `remove` hook fails leaves a stale record (delete
 the file to fix), and deploying *two* `prompt-highlighter` applications to one
-machine makes them fight over the label and colour, since those are baked into the
-one shared script.
+machine makes them fight over the label, colour and layout, since those are baked
+into the one shared script.
 
 Changes apply to shells started after the config change — existing sessions keep
 their old prompt until they are restarted.

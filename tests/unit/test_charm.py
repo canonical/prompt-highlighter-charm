@@ -297,7 +297,7 @@ def test_unknown_segments_are_omitted_not_blank(ctx, fs, tmp_path):
     context = context_line(render_prompt(fs["script"], "bash", tmp_path))
 
     assert " \u00b7  \u00b7 " not in context
-    assert context == f" DEVELOPMENT  staging-mdl \u00b7 {HOSTNAME}"
+    assert context == f" EU-WEST-PROD  staging-mdl \u00b7 {HOSTNAME}"
 
 
 def test_two_subordinate_units_on_one_machine_list_both_principals(fs, tmp_path):
@@ -533,3 +533,176 @@ def test_a_hostile_username_cannot_run_commands(ctx, fs, tmp_path):
         check=True,
     )
     assert not (tmp_path / "pwned").exists()
+
+
+# --- prompt-template and multi-line -----------------------------------------
+
+
+def test_prompt_template_is_baked_into_the_script(ctx, fs):
+    run(ctx, config={"prompt-template": "$model / $units - $hostname"})
+
+    assert 'PROMPT_TEMPLATE = "$model / $units - $hostname"' in fs["script"].read_text()
+
+
+def test_default_template_reproduces_the_original_prompt(ctx, fs, tmp_path):
+    run(ctx, config={"label": "production"})
+
+    context = context_line(render_prompt(fs["script"], "bash", tmp_path))
+
+    assert context == f" PRODUCTION  staging-mdl \u00b7 ubuntu/3 \u00b7 {HOSTNAME}"
+
+
+def test_custom_template_orders_the_fields_and_keeps_the_literal_text(ctx, fs, tmp_path):
+    run(ctx, config={"label": "production", "prompt-template": "$hostname [$model] $units"})
+
+    context = context_line(render_prompt(fs["script"], "bash", tmp_path))
+
+    assert context == f" PRODUCTION  {HOSTNAME} [staging-mdl] ubuntu/3"
+
+
+def test_braced_placeholders_are_accepted(ctx, fs, tmp_path):
+    run(ctx, config={"prompt-template": "${model}:${hostname}"})
+
+    context = context_line(render_prompt(fs["script"], "bash", tmp_path))
+
+    assert context.endswith(f" staging-mdl:{HOSTNAME}")
+
+
+def test_template_fields_keep_their_own_colours(ctx, fs, tmp_path):
+    run(ctx, config={"prompt-template": "$hostname $model"})
+
+    out = render_prompt(fs["script"], "bash", tmp_path)
+
+    # The hostname colour must now come before the model colour.
+    host = out.index("\033[38;5;150m")
+    model = out.index("\033[38;5;111m")
+    assert host < model
+
+
+def test_empty_field_takes_its_preceding_literal_with_it(ctx, fs, tmp_path):
+    run(
+        ctx,
+        event="install",
+        relations=(),
+        config={"label": "staging", "prompt-template": "$model / $units - $hostname"},
+    )
+
+    context = context_line(render_prompt(fs["script"], "bash", tmp_path))
+
+    assert context == f" STAGING  staging-mdl - {HOSTNAME}"
+
+
+def test_empty_first_field_takes_its_following_literal_with_it(ctx, fs, tmp_path):
+    run(
+        ctx,
+        event="install",
+        relations=(),
+        config={"label": "staging", "prompt-template": "$units > $model > $hostname"},
+    )
+
+    context = context_line(render_prompt(fs["script"], "bash", tmp_path))
+
+    assert context == f" STAGING  staging-mdl > {HOSTNAME}"
+
+
+def test_window_title_follows_the_template(ctx, fs, tmp_path):
+    run(ctx, config={"label": "production", "prompt-template": "$hostname ($model)"})
+
+    title = window_title(render_prompt(fs["script"], "bash", tmp_path))
+
+    assert title == f"[PRODUCTION] {HOSTNAME} (staging-mdl)"
+
+
+def test_template_literal_text_is_quoted_for_the_shell(ctx, fs, tmp_path):
+    run(ctx, config={"prompt-template": "100% $model \\ $hostname"})
+
+    bash = strip_escapes(render_prompt(fs["script"], "bash", tmp_path))
+    zsh = strip_escapes(render_prompt(fs["script"], "zsh", tmp_path))
+
+    assert "100% staging-mdl \\\\ " in bash
+    assert "100%% staging-mdl \\ " in zsh
+
+
+def test_unencodable_template_text_degrades_rather_than_crashing(ctx, fs, tmp_path):
+    run(ctx, config={"prompt-template": "$model \u2192 $hostname"})
+
+    out = strip_escapes(render_prompt(fs["script"], "bash", tmp_path, PYTHONIOENCODING="ascii"))
+
+    assert f"staging-mdl ? {HOSTNAME}" in out
+
+
+def test_template_is_stripped(ctx, fs):
+    run(ctx, config={"prompt-template": "  $model  "})
+
+    assert 'PROMPT_TEMPLATE = "$model"' in fs["script"].read_text()
+
+
+def test_badge_only_template_is_allowed(ctx, fs, tmp_path):
+    out = run(ctx, config={"label": "production", "prompt-template": ""})
+
+    assert isinstance(out.unit_status, ops.ActiveStatus)
+    context = context_line(render_prompt(fs["script"], "bash", tmp_path))
+    assert context == " PRODUCTION "
+
+
+@pytest.mark.parametrize(
+    ("template", "expected"),
+    [
+        ("$model $cwd", "unknown placeholder $cwd"),
+        ("${user} $model", "unknown placeholder $user"),
+        ("$model $ $hostname", "stray $"),
+        ("$model\n$hostname", "control character"),
+        ("$model \033[2J", "control character"),
+        ("$model " + "x" * 128, "at most 128"),
+    ],
+)
+def test_invalid_template_blocks_without_touching_the_disk(ctx, fs, template, expected):
+    out = run(ctx, config={"prompt-template": template})
+
+    assert isinstance(out.unit_status, ops.BlockedStatus)
+    assert "invalid prompt-template" in out.unit_status.message
+    assert expected in out.unit_status.message
+    assert not fs["script"].exists()
+
+
+def test_multi_line_is_the_default(ctx, fs, tmp_path):
+    run(ctx)
+
+    out = strip_escapes(render_prompt(fs["script"], "bash", tmp_path))
+
+    assert out.count("\n") == 1
+
+
+def test_single_line_prompt_puts_the_cursor_after_the_context(ctx, fs, tmp_path):
+    run(ctx, config={"label": "production", "multi-line": False})
+
+    out = strip_escapes(render_prompt(fs["script"], "bash", tmp_path))
+
+    assert "\n" not in out
+    assert out == (
+        f" PRODUCTION  staging-mdl \u00b7 ubuntu/3 \u00b7 {HOSTNAME} ubuntu {tmp_path} {SYMBOL} "
+    )
+
+
+def test_single_line_prompt_flags_a_failed_command_before_the_cursor(ctx, fs, tmp_path):
+    run(ctx, config={"multi-line": False})
+
+    out = strip_escapes(render_prompt(fs["script"], "bash", tmp_path, status=3))
+
+    assert out.endswith(f"\u2717 3 ubuntu {tmp_path} {SYMBOL} ")
+
+
+def test_single_line_prompt_still_resets_colour_at_the_end(ctx, fs, tmp_path):
+    run(ctx, config={"multi-line": False})
+
+    out = render_prompt(fs["script"], "bash", tmp_path)
+
+    assert out.endswith("\\[\033[0m\\] ")
+
+
+def test_status_message_names_the_layout(ctx, fs):
+    two = run(ctx, config={"multi-line": True})
+    one = run(ctx, config={"multi-line": False})
+
+    assert "two-line" in two.unit_status.message
+    assert "one-line" in one.unit_status.message

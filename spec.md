@@ -9,8 +9,8 @@ shell on a machine announce, in colour, which environment and which Juju
 model/unit the operator is logged into — so that a `systemctl stop` typed into
 the wrong terminal is visibly wrong before Enter is pressed.
 
-The rendered prompt is two lines — context above, cursor below (`render` in
-`templates/prompt.py.j2`):
+The rendered prompt is, by default, two lines — context above, cursor below
+(`render` in `templates/prompt.py.j2`):
 
 ```
  PRODUCTION  prod-openstack · nova-compute/3 · juju-a1b2c3-7  ✗ 1
@@ -26,6 +26,11 @@ it registers as a block of colour before it is read and still reads as inverted
 on a colourless terminal. The cursor occupies its own line, which leaves the full
 terminal width for typing: nine columns are spent before the cursor against
 seventy-nine for the equivalent single-line prompt.
+
+The context between the badge and the exit status is laid out by the
+`prompt-template` option: `$model`, `$units` and `$hostname` are replaced and
+everything else is literal separator text. `multi-line=false` puts the cursor on
+the same line as the context instead of below it.
 
 The same context is additionally written to the terminal window title, which
 follows an `ssh` or `juju ssh` back to the operator's own terminal emulator.
@@ -65,7 +70,7 @@ uv.lock                  pinned resolution the charm venv and the tests both use
 tox.ini                  lint / unit environments
 src/charm.py             the operator: validation, rendering, file management
 templates/prompt.py.j2   the artefact rendered onto the unit
-tests/unit/test_charm.py 26 tests: charm state transitions + real prompt output
+tests/unit/test_charm.py 49 tests: charm state transitions + real prompt output
 ```
 
 `parts.charm.prime` uses exclusion-only filters, so everything not listed is
@@ -92,11 +97,13 @@ principal ────┘                                       ▼
                             /etc/zsh/zshrc    managed block  (0644, optional)
 ```
 
-**Render time vs. prompt time.** The label, colour, model name and
-principal unit are *baked in* at hook time as Python literals
-(`templates/prompt.py.j2:13-16`). The user, hostname and working directory are
-resolved *per prompt* (`prompt.py.j2:47-77`), so a renamed host or a container
-cloned from an image reports itself correctly without a re-render.
+**Render time vs. prompt time.** The label, colour, model name, prompt
+template and layout are *baked in* at hook time as Python literals
+(`templates/prompt.py.j2`, the module-level constants). The principal units,
+user, hostname and working directory are resolved *per prompt*, so a renamed
+host or a container cloned from an image reports itself correctly without a
+re-render. The template is expanded per prompt too, since two of its three
+fields are only known then (`parse_template`, `context_pieces`).
 
 **Managed block.** Both shell profiles are edited through one primitive,
 `_apply_block` (`src/charm.py:211-229`), which strips any existing block
@@ -117,9 +124,11 @@ of a hook that ran first.
 
 | Option | Type | Default | Validation | Evidence |
 | --- | --- | --- | --- | --- |
-| `label` | string | `development` | stripped, then `^[A-Za-z0-9_][A-Za-z0-9 _.:@+-]{0,31}$` | `charmcraft.yaml:36-42`, `src/charm.py:36,83-88` |
+| `label` | string | `eu-west-prod` | stripped, then `^[A-Za-z0-9_][A-Za-z0-9 _.:@+-]{0,31}$` | `charmcraft.yaml:36-42`, `src/charm.py:36,83-88` |
 | `color` | string | `green` | stripped, lowercased, ∈ {red, green, yellow, blue, magenta, cyan, white, grey} | `charmcraft.yaml:43-48`, `src/charm.py:35,90-95` |
 | `enable-zsh` | boolean | `true` | none | `charmcraft.yaml:49-54`, `src/charm.py:100` |
+| `prompt-template` | string | `$model · $units · $hostname` | stripped; ≤ 128 characters; no C0/DEL/C1 control characters; every `$` must start `$name`/`${name}` with `name` ∈ {model, units, hostname} | `charmcraft.yaml`, `_validate_template` in `src/charm.py` |
+| `multi-line` | boolean | `true` | none | `charmcraft.yaml`, `src/charm.py` |
 
 There is no `enable-bash` counterpart: Bash is always configured
 (`src/charm.py:134`).
@@ -139,8 +148,9 @@ There is no `enable-bash` counterpart: Bash is always configured
   leadership; no handler consults `unit.is_leader()`. *(`src/charm.py:104-185`)*
 - **REQ-4** — While reconciling, the charm shall report `MaintenanceStatus`
   ("Applying prompt configuration"), and on success shall report `ActiveStatus`
-  naming the label, the colour, the configured shells and — where the principal
-  is known — the principal unit. *(`src/charm.py:131,141-147`)*
+  naming the label, the colour, the layout (`two-line` or `one-line`), the
+  configured shells and — where the principal is known — the principal unit.
+  *(`_reconcile`; asserted at `test_status_message_names_the_layout`)*
 - **REQ-5** — The charm shall reconcile idempotently: repeating a hook with
   unchanged inputs shall leave both profiles byte-identical and produce exactly
   one managed block. *(`src/charm.py:228`; asserted at `tests/unit/test_charm.py:97-105`)*
@@ -156,6 +166,14 @@ There is no `enable-bash` counterpart: Bash is always configured
 - **REQ-8** — When `color` is not one of the eight supported colours, the
   charm shall enter `BlockedStatus` with a message listing the valid colours.
   *(`src/charm.py:90-95`)*
+- **REQ-8a** — The charm shall strip `prompt-template` and shall enter
+  `BlockedStatus` with a message beginning `invalid prompt-template:` when it is
+  longer than 128 characters, contains a control character, contains a `$` that
+  does not start a placeholder, or names a placeholder other than `$model`,
+  `$units` or `$hostname`; the message shall name the offending placeholder or
+  character. An empty template is valid. *(`_validate_template`; asserted at
+  `test_invalid_template_blocks_without_touching_the_disk`,
+  `test_badge_only_template_is_allowed`)*
 - **REQ-9** — While the configuration is invalid, the charm shall write nothing
   to disk and shall leave any previously applied configuration untouched — the
   validation happens before the first write and returns early.
@@ -211,9 +229,24 @@ There is no `enable-bash` counterpart: Bash is always configured
 
 ### 7.6 Prompt rendering (generated script)
 
-- **REQ-24** — The script shall print, on stdout, two lines: the badge
-  followed by the Juju model, principal units and hostname joined by
-  `" · "`; then a newline; then `<user> <cwd> <symbol> `. *(`render`)*
+- **REQ-24** — The script shall print, on stdout, the badge followed by the
+  context rendered from `PROMPT_TEMPLATE`, then — when `MULTI_LINE` is true — a
+  newline, otherwise a single space, then `<user> <cwd> <symbol> `. With the
+  default template the context is the Juju model, principal units and hostname
+  joined by `" · "`. *(`render`; asserted at
+  `test_prompt_puts_context_above_and_the_cursor_on_its_own_line`,
+  `test_single_line_prompt_puts_the_cursor_after_the_context`)*
+- **REQ-24d** — The script shall expand `$name` and `${name}` in the template
+  to the named field, painting each field in its own colour and every literal
+  run in the separator colour; a placeholder the charm did not validate (only
+  possible by hand-editing the script) shall be shown literally.
+  *(`parse_template`, `context_pieces`; asserted at
+  `test_custom_template_orders_the_fields_and_keeps_the_literal_text`,
+  `test_braced_placeholders_are_accepted`,
+  `test_template_fields_keep_their_own_colours`)*
+- **REQ-24e** — When the context is empty, the script shall emit the badge
+  with no joining space after it. *(`render`; asserted at
+  `test_badge_only_template_is_allowed`)*
 - **REQ-24a** — The script shall draw the label as a reverse-video
   badge, padded with one space on each side, using the background colour named
   by `BADGE_COLOR` from the basic ANSI range so that it renders on any ANSI
@@ -224,9 +257,13 @@ There is no `enable-bash` counterpart: Bash is always configured
   shall append a failure mark and that status to the context line; when it is
   zero or absent it shall append nothing. *(`render`, `__main__`)*
 - **REQ-25** — The script shall upper-case the label. *(`render`)*
-- **REQ-26** — When a field is empty, the script shall omit it together with its
-  separator rather than emit a blank ` ·  · ` gap. *(`render`; asserted at
-  `test_unknown_segments_are_omitted_not_blank`)*
+- **REQ-26** — When a field is empty, the script shall omit it together with the
+  literal text between it and the previous field — or, when it is the first
+  field, the literal text between it and the next — rather than emit a blank
+  ` ·  · ` gap. *(`context_pieces`; asserted at
+  `test_unknown_segments_are_omitted_not_blank`,
+  `test_empty_field_takes_its_preceding_literal_with_it`,
+  `test_empty_first_field_takes_its_following_literal_with_it`)*
 - **REQ-26a** — The script shall name at most `MAX_PRINCIPALS` (2) principal
   units and summarise any remainder as `+<n> more`. *(`current_principals`;
   asserted at `test_long_principal_list_is_capped`)*
@@ -234,8 +271,10 @@ There is no `enable-bash` counterpart: Bash is always configured
   sequences in `\[`/`\]`; when invoked as `… zsh`, in `%{`/`%}`; for any other
   argument it shall emit no delimiters. *(`templates/prompt.py.j2:32-35,81`)*
 - **REQ-28** — The script shall escape shell-significant characters in every
-  interpolated segment: backslashes for Bash, `%` for Zsh.
-  *(`templates/prompt.py.j2:38-44`; asserted at `tests/unit/test_charm.py:242-251`)*
+  interpolated segment, the template's literal text included: backslashes for
+  Bash, `%` for Zsh. *(`quote`; asserted at
+  `test_generated_script_escapes_prompt_metacharacters`,
+  `test_template_literal_text_is_quoted_for_the_shell`)*
 - **REQ-29** — When `BADGE_COLOR` is not a known colour, the script shall fall
   back to green. *(`templates/prompt.py.j2:82`)*
 - **REQ-30** — The script shall resolve the user from `USER`, `LOGNAME` or
@@ -253,18 +292,22 @@ There is no `enable-bash` counterpart: Bash is always configured
 - **REQ-34** — The script shall reset the colour at the end of the prompt so that
   typed input is not coloured. *(`render`)*
 - **REQ-34a** — The script shall write an OSC window-title sequence carrying
-  `[LABEL]` and the same context fields, wrapped as non-printing, unless `TERM`
-  names a terminal with no title bar (`TITLELESS_TERMS`), in which case it shall
-  write no sequence at all. *(`window_title_text`, `render`; asserted at
-  `test_window_title_carries_the_context` and
+  `[LABEL]` and the same context, rendered from the same template as plain
+  text, wrapped as non-printing, unless `TERM` names a terminal with no title
+  bar (`TITLELESS_TERMS`), in which case it shall write no sequence at all.
+  *(`window_title_text`, `render`; asserted at
+  `test_window_title_carries_the_context`,
+  `test_window_title_follows_the_template` and
   `test_no_window_title_where_there_is_no_title_bar`)*
 - **REQ-34b** — The script shall strip control characters from the window title,
   which would otherwise terminate the sequence early and spill the remainder
   onto the screen. *(`window_title_text`)*
-- **REQ-34c** — Where the output encoding cannot represent `·` and `✗`, the
-  script shall substitute `-` and `x` rather than emit replacement characters.
-  *(`glyphs`; asserted at
-  `test_separator_falls_back_to_ascii_when_the_locale_cannot_encode_it`)*
+- **REQ-34c** — Where the output encoding cannot represent a character of the
+  prompt, the script shall substitute `-` for `·`, `x` for `✗` and `?` for
+  anything else, rather than emit replacement characters or fail to print.
+  *(`encodable`; asserted at
+  `test_separator_falls_back_to_ascii_when_the_locale_cannot_encode_it`,
+  `test_unencodable_template_text_degrades_rather_than_crashing`)*
 
 ### 7.7 Shell integration
 
@@ -331,7 +374,7 @@ doing. Failures additionally go to the unit log via `logger.exception`.
 
 ## 9. Acceptance criteria
 
-Derived from the 26 tests in `tests/unit/test_charm.py` (33 cases with
+Derived from the 49 tests in `tests/unit/test_charm.py` (68 cases with
 parametrisation), which combine Scenario
 state transitions with *executing* the generated script in a subprocess and
 comparing real output (`tests/unit/test_charm.py:168-176`).
@@ -360,6 +403,12 @@ comparing real output (`tests/unit/test_charm.py:168-176`).
 | AC-20 | A non-zero exit status is flagged on the context line; zero is not | `test_failed_command_is_flagged_on_the_context_line` |
 | AC-21 | A fourth principal is summarised as `+2 more` and not named | `test_long_principal_list_is_capped` |
 | AC-22 | An ASCII-only output encoding falls back to `-` and `x` | `test_separator_falls_back_to_ascii_when_the_locale_cannot_encode_it` |
+| AC-23 | The template is baked into the script, stripped, and the default reproduces the original prompt | `test_prompt_template_is_baked_into_the_script`, `test_template_is_stripped`, `test_default_template_reproduces_the_original_prompt` |
+| AC-24 | A custom template reorders the fields, keeps the literal text and each field's colour | `test_custom_template_orders_the_fields_and_keeps_the_literal_text`, `test_braced_placeholders_are_accepted`, `test_template_fields_keep_their_own_colours` |
+| AC-25 | An empty field takes the literal before it (or after it, when first) | `test_empty_field_takes_its_preceding_literal_with_it`, `test_empty_first_field_takes_its_following_literal_with_it` |
+| AC-26 | The window title follows the template; literal text is shell-quoted; unencodable text degrades to `?` | `test_window_title_follows_the_template`, `test_template_literal_text_is_quoted_for_the_shell`, `test_unencodable_template_text_degrades_rather_than_crashing` |
+| AC-27 | Six invalid templates block the unit naming the fault; an empty one is badge-only | `test_invalid_template_blocks_without_touching_the_disk`, `test_badge_only_template_is_allowed` |
+| AC-28 | `multi-line` defaults to two lines; `false` yields one line with the failure mark before the cursor and the colour reset at the end; the status names the layout | `test_multi_line_is_the_default`, `test_single_line_prompt_*`, `test_status_message_names_the_layout` |
 
 **Not covered:** integration/functional tests against a real Juju model, `start`
 and `upgrade-charm` handlers (they share `_reconcile`, but no test drives them),
