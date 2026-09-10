@@ -65,15 +65,15 @@ def run(ctx, event="config_changed", config=None, relations=(PRINCIPAL,)):
 
 
 def test_config_changed_writes_script_and_profiles(ctx, fs):
-    out = run(ctx, config={"environment-type": "production", "prompt-color": "red"})
+    out = run(ctx, config={"label": "production", "color": "red"})
 
     assert isinstance(out.unit_status, ops.ActiveStatus)
     assert "production" in out.unit_status.message
     assert "red" in out.unit_status.message
 
     script = fs["script"].read_text()
-    assert 'ENVIRONMENT_LABEL = "production"' in script
-    assert 'PROMPT_COLOR = "red"' in script
+    assert 'BADGE_LABEL = "production"' in script
+    assert 'BADGE_COLOR = "red"' in script
     assert fs["script"].stat().st_mode & 0o777 == 0o755
 
     for rc in (fs["bashrc"], fs["zshrc"]):
@@ -104,12 +104,12 @@ def test_existing_profile_content_is_preserved(ctx, fs):
 def test_reapplying_does_not_duplicate_the_block(ctx, fs):
     run(ctx)
     first = fs["bashrc"].read_text()
-    run(ctx, config={"prompt-color": "blue"})
+    run(ctx, config={"color": "blue"})
     second = fs["bashrc"].read_text()
 
     assert first.count(charm_module.BLOCK_START) == 1
     assert second.count(charm_module.BLOCK_START) == 1
-    assert 'PROMPT_COLOR = "blue"' in fs["script"].read_text()
+    assert 'BADGE_COLOR = "blue"' in fs["script"].read_text()
 
 
 def test_disabling_zsh_removes_only_the_zsh_block(ctx, fs):
@@ -143,11 +143,11 @@ def test_remove_undoes_every_change(ctx, fs):
 @pytest.mark.parametrize(
     ("config", "expected"),
     [
-        ({"prompt-color": "octarine"}, "invalid prompt-color"),
-        ({"prompt-color": ""}, "invalid prompt-color"),
-        ({"environment-type": ""}, "invalid environment-type"),
-        ({"environment-type": "prod\nrm -rf /"}, "invalid environment-type"),
-        ({"environment-type": "a" * 33}, "invalid environment-type"),
+        ({"color": "octarine"}, "invalid color"),
+        ({"color": ""}, "invalid color"),
+        ({"label": ""}, "invalid label"),
+        ({"label": "prod\nrm -rf /"}, "invalid label"),
+        ({"label": "a" * 33}, "invalid label"),
     ],
 )
 def test_invalid_config_blocks_without_touching_the_disk(ctx, fs, config, expected):
@@ -160,11 +160,11 @@ def test_invalid_config_blocks_without_touching_the_disk(ctx, fs, config, expect
 
 
 def test_config_values_are_normalised(ctx, fs):
-    run(ctx, config={"environment-type": " staging ", "prompt-color": " GREEN "})
+    run(ctx, config={"label": " staging ", "color": " GREEN "})
 
     script = fs["script"].read_text()
-    assert 'ENVIRONMENT_LABEL = "staging"' in script
-    assert 'PROMPT_COLOR = "green"' in script
+    assert 'BADGE_LABEL = "staging"' in script
+    assert 'BADGE_COLOR = "green"' in script
 
 
 def strip_escapes(prompt: str) -> str:
@@ -237,7 +237,7 @@ def test_relation_joined_refreshes_the_principal_unit(ctx, fs):
 
 
 def test_prompt_puts_context_above_and_the_cursor_on_its_own_line(ctx, fs, tmp_path):
-    run(ctx, config={"environment-type": "production", "prompt-color": "red"})
+    run(ctx, config={"label": "production", "color": "red"})
 
     out = strip_escapes(render_prompt(fs["script"], "bash", tmp_path))
     context, cursor = out.split("\n")
@@ -246,8 +246,8 @@ def test_prompt_puts_context_above_and_the_cursor_on_its_own_line(ctx, fs, tmp_p
     assert cursor == f"ubuntu {tmp_path} {SYMBOL} "
 
 
-def test_environment_badge_is_a_filled_block_not_bracketed_text(ctx, fs, tmp_path):
-    run(ctx, config={"environment-type": "production", "prompt-color": "red"})
+def test_badge_is_a_filled_block_not_bracketed_text(ctx, fs, tmp_path):
+    run(ctx, config={"label": "production", "color": "red"})
 
     out = render_prompt(fs["script"], "bash", tmp_path)
 
@@ -258,13 +258,13 @@ def test_environment_badge_is_a_filled_block_not_bracketed_text(ctx, fs, tmp_pat
 
 
 def test_grey_badge_lets_development_recede(ctx, fs, tmp_path):
-    run(ctx, config={"environment-type": "development", "prompt-color": "grey"})
+    run(ctx, config={"label": "development", "color": "grey"})
 
     assert "\033[100m" in render_prompt(fs["script"], "bash", tmp_path)
 
 
 def test_window_title_carries_the_context(ctx, fs, tmp_path):
-    run(ctx, config={"environment-type": "production"})
+    run(ctx, config={"label": "production"})
 
     title = window_title(render_prompt(fs["script"], "bash", tmp_path))
 
@@ -389,7 +389,7 @@ def test_last_unit_off_the_machine_cleans_everything(ctx, fs):
 
 
 def test_generated_script_wraps_escapes_for_bash(ctx, fs, tmp_path):
-    run(ctx, config={"environment-type": "production", "prompt-color": "red"})
+    run(ctx, config={"label": "production", "color": "red"})
 
     out = render_prompt(fs["script"], "bash", tmp_path)
 
@@ -399,7 +399,7 @@ def test_generated_script_wraps_escapes_for_bash(ctx, fs, tmp_path):
 
 
 def test_generated_script_wraps_escapes_for_zsh(ctx, fs, tmp_path):
-    run(ctx, config={"environment-type": "staging", "prompt-color": "blue"})
+    run(ctx, config={"label": "staging", "color": "blue"})
 
     out = render_prompt(fs["script"], "zsh", tmp_path)
 

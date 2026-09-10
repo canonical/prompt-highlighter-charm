@@ -92,7 +92,7 @@ principal ────┘                                       ▼
                             /etc/zsh/zshrc    managed block  (0644, optional)
 ```
 
-**Render time vs. prompt time.** The environment label, colour, model name and
+**Render time vs. prompt time.** The label, colour, model name and
 principal unit are *baked in* at hook time as Python literals
 (`templates/prompt.py.j2:13-16`). The user, hostname and working directory are
 resolved *per prompt* (`prompt.py.j2:47-77`), so a renamed host or a container
@@ -117,8 +117,8 @@ of a hook that ran first.
 
 | Option | Type | Default | Validation | Evidence |
 | --- | --- | --- | --- | --- |
-| `environment-type` | string | `development` | stripped, then `^[A-Za-z0-9_][A-Za-z0-9 _.:@+-]{0,31}$` | `charmcraft.yaml:36-42`, `src/charm.py:36,83-88` |
-| `prompt-color` | string | `green` | stripped, lowercased, ∈ {red, green, yellow, blue, magenta, cyan, white, grey} | `charmcraft.yaml:43-48`, `src/charm.py:35,90-95` |
+| `label` | string | `development` | stripped, then `^[A-Za-z0-9_][A-Za-z0-9 _.:@+-]{0,31}$` | `charmcraft.yaml:36-42`, `src/charm.py:36,83-88` |
+| `color` | string | `green` | stripped, lowercased, ∈ {red, green, yellow, blue, magenta, cyan, white, grey} | `charmcraft.yaml:43-48`, `src/charm.py:35,90-95` |
 | `enable-zsh` | boolean | `true` | none | `charmcraft.yaml:49-54`, `src/charm.py:100` |
 
 There is no `enable-bash` counterpart: Bash is always configured
@@ -148,12 +148,12 @@ There is no `enable-bash` counterpart: Bash is always configured
 ### 7.2 Configuration validation
 
 - **REQ-6** — The charm shall strip surrounding whitespace from
-  `environment-type` and shall strip and lowercase `prompt-color` before use.
+  `label` and shall strip and lowercase `color` before use.
   *(`src/charm.py:83,90`)*
-- **REQ-7** — When `environment-type` does not match the label pattern, the charm
+- **REQ-7** — When `label` does not match the label pattern, the charm
   shall enter `BlockedStatus` with a message naming the option and the expected
   character set. *(`src/charm.py:84-88`)*
-- **REQ-8** — When `prompt-color` is not one of the eight supported colours, the
+- **REQ-8** — When `color` is not one of the eight supported colours, the
   charm shall enter `BlockedStatus` with a message listing the valid colours.
   *(`src/charm.py:90-95`)*
 - **REQ-9** — While the configuration is invalid, the charm shall write nothing
@@ -211,19 +211,19 @@ There is no `enable-bash` counterpart: Bash is always configured
 
 ### 7.6 Prompt rendering (generated script)
 
-- **REQ-24** — The script shall print, on stdout, two lines: the environment
-  badge followed by the Juju model, principal units and hostname joined by
+- **REQ-24** — The script shall print, on stdout, two lines: the badge
+  followed by the Juju model, principal units and hostname joined by
   `" · "`; then a newline; then `<user> <cwd> <symbol> `. *(`render`)*
-- **REQ-24a** — The script shall draw the environment label as a reverse-video
+- **REQ-24a** — The script shall draw the label as a reverse-video
   badge, padded with one space on each side, using the background colour named
-  by `PROMPT_COLOR` from the basic ANSI range so that it renders on any ANSI
+  by `BADGE_COLOR` from the basic ANSI range so that it renders on any ANSI
   terminal. *(`BADGES`, `render`)*
 - **REQ-24b** — The script shall print `#` as the prompt symbol when the
   effective user id is 0 and `$` otherwise. *(`render`)*
 - **REQ-24c** — When the exit status passed as `argv[2]` is non-zero, the script
   shall append a failure mark and that status to the context line; when it is
   zero or absent it shall append nothing. *(`render`, `__main__`)*
-- **REQ-25** — The script shall upper-case the environment label. *(`render`)*
+- **REQ-25** — The script shall upper-case the label. *(`render`)*
 - **REQ-26** — When a field is empty, the script shall omit it together with its
   separator rather than emit a blank ` ·  · ` gap. *(`render`; asserted at
   `test_unknown_segments_are_omitted_not_blank`)*
@@ -236,7 +236,7 @@ There is no `enable-bash` counterpart: Bash is always configured
 - **REQ-28** — The script shall escape shell-significant characters in every
   interpolated segment: backslashes for Bash, `%` for Zsh.
   *(`templates/prompt.py.j2:38-44`; asserted at `tests/unit/test_charm.py:242-251`)*
-- **REQ-29** — When `PROMPT_COLOR` is not a known colour, the script shall fall
+- **REQ-29** — When `BADGE_COLOR` is not a known colour, the script shall fall
   back to green. *(`templates/prompt.py.j2:82`)*
 - **REQ-30** — The script shall resolve the user from `USER`, `LOGNAME` or
   `USERNAME` in that order, falling back to the literal `user`.
@@ -289,7 +289,7 @@ There is no `enable-bash` counterpart: Bash is always configured
 ## 8. Non-functional observations
 
 **Security.** Configuration reaches the unit as *data*, never as shell text.
-`environment-type` is constrained by a regex that excludes quotes, `$`,
+`label` is constrained by a regex that excludes quotes, `$`,
 backticks, newlines and `;` (`src/charm.py:36`), and is then embedded through
 Jinja's `tojson` filter as a Python string literal
 (`templates/prompt.py.j2:13-16`) — two independent barriers against injection
@@ -353,8 +353,8 @@ comparing real output (`tests/unit/test_charm.py:168-176`).
 | AC-13 | An unknown principal yields no double separator | `test_unknown_segments_are_omitted_not_blank` |
 | AC-14 | Escapes are wrapped in `\[…\]` for Bash and `%{…%}` for Zsh | `test_generated_script_wraps_escapes_for_{bash,zsh}` |
 | AC-15 | A directory named `100%_back\slash` is escaped per shell | `test_generated_script_escapes_prompt_metacharacters` |
-| AC-16 | The label is a background-colour block, and `[PRODUCTION]` appears nowhere in the text | `test_environment_badge_is_a_filled_block_not_bracketed_text` |
-| AC-17 | `prompt-color=grey` selects the bright-black background | `test_grey_badge_lets_development_recede` |
+| AC-16 | The label is a background-colour block, and `[PRODUCTION]` appears nowhere in the text | `test_badge_is_a_filled_block_not_bracketed_text` |
+| AC-17 | `color=grey` selects the bright-black background | `test_grey_badge_lets_development_recede` |
 | AC-18 | The window title carries `[LABEL]` and the context fields | `test_window_title_carries_the_context` |
 | AC-19 | `TERM` of `linux`, `dumb`, empty or unset emits no OSC sequence at all | `test_no_window_title_where_there_is_no_title_bar` |
 | AC-20 | A non-zero exit status is flagged on the context line; zero is not | `test_failed_command_is_flagged_on_the_context_line` |
@@ -370,7 +370,7 @@ by a real `bash`/`zsh`.
 
 1. **The documented label pattern is wider than the implemented one.**
    `charmcraft.yaml:40-42` and `README.md` both say "1-32 characters from
-   `[A-Za-z0-9 _.:@+-]`", but `ENV_LABEL` (`src/charm.py:36`) additionally
+   `[A-Za-z0-9 _.:@+-]`", but `LABEL_PATTERN` (`src/charm.py:36`) additionally
    requires the *first* character to be `[A-Za-z0-9_]`. `.staging` or `-prod`
    are rejected with a message that says they should be accepted. Either the
    regex or the description should move.

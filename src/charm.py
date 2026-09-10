@@ -38,11 +38,11 @@ ZSH_RC = pathlib.Path("/etc/zsh/zshrc")
 BLOCK_START = "# BEGIN prompt-highlighter charm (managed) -- do not edit"
 BLOCK_END = "# END prompt-highlighter charm"
 
-# The colour of the environment badge. "grey" exists so that a development
-# environment can be given a deliberately boring badge -- an unremarkable dev
-# prompt is what leaves the red production one its meaning.
+# The colour of the badge. "grey" exists so that a development environment can be
+# given a deliberately boring badge -- an unremarkable dev prompt is what leaves
+# the red production one its meaning.
 VALID_COLORS = ("red", "green", "yellow", "blue", "magenta", "cyan", "white", "grey")
-ENV_LABEL = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9 _.:@+-]{0,31}$")
+LABEL_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9 _.:@+-]{0,31}$")
 
 
 def _bash_snippet() -> str:
@@ -89,29 +89,28 @@ class ConfigError(Exception):
 class PromptConfig:
     """Validated view of the charm's configuration options."""
 
-    environment_type: str
-    prompt_color: str
+    label: str
+    color: str
     enable_zsh: bool
 
     @classmethod
     def load(cls, config: ops.ConfigData) -> "PromptConfig":
         """Read and validate the charm config, raising ConfigError if unusable."""
-        environment_type = typing.cast(str, config["environment-type"]).strip()
-        if not ENV_LABEL.match(environment_type):
+        label = typing.cast(str, config["label"]).strip()
+        if not LABEL_PATTERN.match(label):
             raise ConfigError(
-                f"invalid environment-type {environment_type!r}: expected 1-32 "
-                "characters from [A-Za-z0-9 _.:@+-]"
+                f"invalid label {label!r}: expected 1-32 characters from [A-Za-z0-9 _.:@+-]"
             )
 
-        prompt_color = typing.cast(str, config["prompt-color"]).strip().lower()
-        if prompt_color not in VALID_COLORS:
+        color = typing.cast(str, config["color"]).strip().lower()
+        if color not in VALID_COLORS:
             raise ConfigError(
-                f"invalid prompt-color {prompt_color!r}: expected one of {', '.join(VALID_COLORS)}"
+                f"invalid color {color!r}: expected one of {', '.join(VALID_COLORS)}"
             )
 
         return cls(
-            environment_type=environment_type,
-            prompt_color=prompt_color,
+            label=label,
+            color=color,
             enable_zsh=typing.cast(bool, config["enable-zsh"]),
         )
 
@@ -166,8 +165,7 @@ class PromptHighlighterCharm(ops.CharmBase):
         shells = "bash and zsh" if config.enable_zsh else "bash"
         alongside = f" on {principal}" if principal else ""
         self.unit.status = ops.ActiveStatus(
-            f"Prompt set to {config.environment_type} "
-            f"({config.prompt_color}) for {shells}{alongside}"
+            f"Prompt set to {config.label} ({config.color}) for {shells}{alongside}"
         )
 
     def _on_remove(self, _: ops.RemoveEvent) -> None:
@@ -220,8 +218,8 @@ class PromptHighlighterCharm(ops.CharmBase):
         )
         template = env.get_template("prompt.py.j2")
         return template.render(
-            environment_type=config.environment_type,
-            prompt_color=config.prompt_color,
+            label=config.label,
+            color=config.color,
             juju_model=self.model.name,
             principal_dir=str(PRINCIPAL_DIR),
         )

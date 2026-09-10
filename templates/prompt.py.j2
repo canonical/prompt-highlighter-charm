@@ -10,8 +10,8 @@ Usage: juju_dynamic_prompt.py [bash|zsh] [exit-status]
 import os
 import sys
 
-ENVIRONMENT_LABEL = {{ environment_type | tojson }}
-PROMPT_COLOR = {{ prompt_color | tojson }}
+BADGE_LABEL = {{ label | tojson }}
+BADGE_COLOR = {{ color | tojson }}
 JUJU_MODEL = {{ juju_model | tojson }}
 PRINCIPAL_DIR = {{ principal_dir | tojson }}
 
@@ -21,7 +21,7 @@ MAX_PRINCIPALS = 2
 
 RESET = "\033[0m"
 
-# The environment label is drawn as a filled block rather than bracketed text.
+# The label is drawn as a filled block rather than bracketed text.
 # A block of colour registers before it is read, and it still reads as reverse
 # video on a terminal with no colour at all -- which bracketed text does not.
 # These are the basic background codes (40-47 and 100), so they land correctly
@@ -38,8 +38,8 @@ BADGES = {
 }
 
 # Everything that is not the badge is deliberately quieter than the badge, so
-# that the environment keeps the attention it is there to claim. The principal
-# list is the longest field and gets the dimmest colour of the three.
+# that the label keeps the attention it is there to claim. The principal list is
+# the longest field and gets the dimmest colour of the three.
 MODEL_COLOR = "\033[38;5;111m"
 UNITS_COLOR = "\033[38;5;245m"
 HOST_COLOR = "\033[38;5;150m"
@@ -194,7 +194,7 @@ def window_title_text(fields, separator):
     # Control characters would end the sequence early and spill the rest of the
     # title onto the screen as literal text; quote() takes them out on the way
     # into the prompt, along with everything the shell would expand.
-    return "[" + ENVIRONMENT_LABEL.upper() + "] " + separator.join(fields)
+    return "[" + BADGE_LABEL.upper() + "] " + separator.join(fields)
 
 
 def render(shell, exit_status):
@@ -212,11 +212,11 @@ def render(shell, exit_status):
     principals = current_principals()
     hostname = current_hostname()
 
-    badge = BADGES.get(PROMPT_COLOR.lower(), BADGES["green"])
+    badge = BADGES.get(BADGE_COLOR.lower(), BADGES["green"])
     label = (
         raw(badge + "\033[1m")
         + " "
-        + quote(ENVIRONMENT_LABEL.upper(), shell)
+        + quote(BADGE_LABEL.upper(), shell)
         + " "
         + raw(RESET)
     )

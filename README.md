@@ -10,7 +10,7 @@ wrong before Enter is pressed.
 root ~ #
 ```
 
-The environment label is a **reverse-video badge** — ` PRODUCTION ` is white on a
+The label is a **reverse-video badge** — ` PRODUCTION ` is white on a
 red field — rather than bracketed text. A block of colour registers before it is
 read, and it still reads as inverted on a terminal with no colour at all, which
 bracketed text does not. Everything after the badge is deliberately quieter, and
@@ -23,7 +23,7 @@ same five facts.
 
 | Segment | Source | Resolved |
 | --- | --- | --- |
-| Environment badge | `environment-type` + `prompt-color` config | at hook time |
+| Badge | `label` + `color` config | at hook time |
 | Juju model | Juju | at hook time |
 | Principal units | the record directory, see below | at prompt time |
 | Hostname | `os.uname()` | at prompt time |
@@ -38,7 +38,7 @@ Three details earn their keep:
 - **The principal list stops at two**, then says `+2 more`. A machine with a deep
   stack of principals cannot push your cursor off the screen.
 
-Pick `prompt-color=grey` for development. A badge only means something if the
+Pick `color=grey` for development. A badge only means something if the
 unremarkable environments look unremarkable; if every prompt shouts, none of them
 does.
 
@@ -73,8 +73,8 @@ Two things to know:
 1. `config-changed` (and `juju-info-relation-joined`) writes this unit's
    principal name to `/var/lib/juju-prompt-highlighter/principals/<unit>`, then
    renders `templates/prompt.py.j2` into
-   `/usr/local/bin/juju_dynamic_prompt.py`, baking in the configured
-   environment label and colour and the Juju model name.
+   `/usr/local/bin/juju_dynamic_prompt.py`, baking in the configured label
+   and colour and the Juju model name.
 2. The charm installs a *managed block* into `/etc/bash.bashrc` (and
    `/etc/zsh/zshrc` when `enable-zsh` is true) that calls that script to build
    the prompt before each command, passing it the exit status of the command you
@@ -112,8 +112,8 @@ Each file ships a virtual environment built by that series' own Python (3.10,
 Configure it:
 
 ```bash
-juju config prompt-highlighter environment-type=production prompt-color=red
-juju config prompt-highlighter environment-type=development prompt-color=grey
+juju config prompt-highlighter label=production color=red
+juju config prompt-highlighter label=development color=grey
 juju config prompt-highlighter enable-zsh=false
 ```
 
@@ -121,12 +121,17 @@ juju config prompt-highlighter enable-zsh=false
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `environment-type` | string | `development` | Label shown in the badge. 1-32 characters from `[A-Za-z0-9 _.:@+-]`, starting with a letter, digit or underscore. |
-| `prompt-color` | string | `green` | Badge background: `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `grey`. |
+| `label` | string | `development` | Text shown in the badge. 1-32 characters from `[A-Za-z0-9 _.:@+-]`, starting with a letter, digit or underscore. |
+| `color` | string | `green` | Badge background: `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `grey`. |
 | `enable-zsh` | boolean | `true` | Also configure `/etc/zsh/zshrc`. |
 
 An invalid value puts the unit into `blocked` with a message naming the offending
 option; the on-disk configuration is left untouched until it is corrected.
+
+**Upgrading from a revision before this rename:** `environment-type` and
+`prompt-color` are now `label` and `color`. Juju drops the settings of options
+that no longer exist, so units come back on the defaults after `juju refresh` --
+re-run `juju config prompt-highlighter label=... color=...`.
 
 Badge backgrounds use the basic ANSI codes so they land correctly on any
 terminal; the dimmer context colours use the 256-colour palette. Where the
