@@ -14,6 +14,7 @@ updated in place and removed cleanly.
 import contextlib
 import dataclasses
 import logging
+import os
 import pathlib
 import re
 import typing
@@ -42,7 +43,8 @@ BLOCK_END = "# END prompt-highlighter charm"
 # given a deliberately boring badge -- an unremarkable dev prompt is what leaves
 # the red production one its meaning.
 VALID_COLORS = ("red", "green", "yellow", "blue", "magenta", "cyan", "white", "grey")
-LABEL_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9 _.:@+-]{0,31}$")
+# Matched with fullmatch: a trailing "$" would still accept a final newline.
+LABEL_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9 _.:@+-]{0,31}")
 
 # The placeholders a prompt template may use. Each is resolved by the generated
 # script: the model is baked in at render time, the other two are read at
@@ -109,7 +111,7 @@ class PromptConfig:
     def load(cls, config: ops.ConfigData) -> "PromptConfig":
         """Read and validate the charm config, raising ConfigError if unusable."""
         label = typing.cast(str, config["label"]).strip()
-        if not LABEL_PATTERN.match(label):
+        if not LABEL_PATTERN.fullmatch(label):
             raise ConfigError(
                 f"invalid label {label!r}: expected 1-32 characters from [A-Za-z0-9 _.:@+-]"
             )
@@ -284,12 +286,23 @@ def _principal_records() -> list[str]:
 
 
 def _write_file(path: pathlib.Path, content: str, mode: int) -> None:
-    """Write path atomically, so a live shell never reads a half-written file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.juju-tmp")
-    tmp.write_text(content)
-    tmp.chmod(mode)
-    tmp.replace(path)
+    """Write path atomically, so a live shell never reads a half-written file.
+
+    The umask is pinned while the file and any missing directories are
+    created. Root runs the script on every prompt, so neither it nor a
+    directory on the way to it may ever be writable by anyone else; and every
+    user's shell reads the principal records, so those may not come out
+    private either. Neither may hinge on whatever umask the hook inherited.
+    """
+    umask = os.umask(0o022)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.juju-tmp")
+        tmp.write_text(content)
+        tmp.chmod(mode)
+        tmp.replace(path)
+    finally:
+        os.umask(umask)
 
 
 def _strip_block(text: str) -> str:

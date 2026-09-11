@@ -244,7 +244,10 @@ One control is worth knowing about from the outside: a shell re-expands its
 prompt on every draw, so anything variable that reaches it — a directory name,
 `$USER`, a hostname — could otherwise be *executed* as whoever is at the
 keyboard. The generated script neutralises command substitution and strips
-control characters before either can happen, per shell.
+control characters before either can happen, per shell. The script itself runs
+under the system interpreter in isolated mode, so a `PYTHONPATH` or user
+site-packages belonging to whoever is at the keyboard cannot change what it
+executes.
 
 ## Development
 

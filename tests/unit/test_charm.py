@@ -173,6 +173,17 @@ def strip_escapes(prompt: str) -> str:
     return re.sub(r"\\\[|\\\]|%\{|%\}|\033\[[0-9;]*m", "", prompt)
 
 
+def expand_bash(ps1: str) -> str:
+    """Return the prompt as bash would draw it, minus colours, title and markers."""
+    expanded = subprocess.run(
+        ["bash", "-c", 'PS1="$1"; printf "%s" "${PS1@P}"', "_", ps1],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return re.sub(r"[\001\002]|\033\][0-9]*;[^\007]*\007|\033\[[0-9;]*m", "", expanded)
+
+
 def window_title(prompt: str) -> str | None:
     """Return the text of the OSC window-title sequence, or None if there is none."""
     match = re.search(r"\033\]0;([^\007]*)\007", prompt)
@@ -417,7 +428,9 @@ def test_generated_script_escapes_prompt_metacharacters(ctx, fs, tmp_path):
     bash = render_prompt(fs["script"], "bash", awkward)
 
     assert "100%%_back\\slash" in zsh
-    assert "100%_back\\\\slash" in bash
+    # Four: bash halves them once when decoding the prompt and once more when
+    # expanding it, and one is what the operator named the directory with.
+    assert "100%_back" + "\\" * 4 + "slash" in bash
 
 
 # A prompt string is re-expanded by the shell on every draw, so anything the
@@ -427,6 +440,13 @@ INJECTIONS = [
     "`touch pwned`",
     "${IFS}",
     "$USER",
+    # Bash decodes backslash escapes before it expands the prompt, so a
+    # backslash written in front of the metacharacter is consumed by the first
+    # step and leaves the metacharacter live for the second.
+    "\\$(touch pwned)",
+    "\\`touch pwned`",
+    "\\\\$(touch pwned)",
+    '\\"$(touch pwned)',
 ]
 
 
@@ -517,6 +537,76 @@ def test_backslashes_in_a_path_are_not_read_as_bash_prompt_escapes(ctx, fs, tmp_
         check=True,
     ).stdout
     assert r"\u\h\w" in expanded
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["a\\b", "a\\\\b", "a\\\\\\b", "\\$", 'a"b', "it's", "end\\", "\\\\\\\\"],
+)
+def test_bash_prompt_shows_backslashes_and_quotes_as_written(ctx, fs, tmp_path, name):
+    """The name must come through both of bash's passes over the prompt unchanged."""
+    run(ctx)
+    hostile = tmp_path / name
+    hostile.mkdir()
+
+    cursor = expand_bash(render_prompt(fs["script"], "bash", hostile)).split("\n")[1]
+
+    assert cursor == f"ubuntu {tmp_path}/{name} {SYMBOL} "
+
+
+def test_script_runs_isolated_from_the_callers_python_environment(ctx, fs, tmp_path):
+    """A PYTHONPATH of whoever is at the keyboard must not put code into the script.
+
+    It runs as that user, root included, inside that user's own environment.
+    """
+    run(ctx)
+    assert fs["script"].read_text().startswith("#!/usr/bin/python3 -I\n")
+    if not os.access("/usr/bin/python3", os.X_OK):
+        pytest.skip("no system python3 to run the shebang with")
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    (shadow / "re.py").write_text("raise SystemExit('hijacked')\n")
+
+    # Through the shebang, not sys.executable, so the interpreter flags apply.
+    out = subprocess.run(
+        [str(fs["script"]), "bash", "0"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env={
+            "USER": "ubuntu",
+            "HOME": "/home/ubuntu",
+            "PATH": "/usr/bin:/bin",
+            "LANG": "C.UTF-8",
+            "TERM": "xterm",
+            "PYTHONPATH": str(shadow),
+        },
+    )
+
+    assert out.returncode == 0, out.stderr
+    assert "hijacked" not in out.stderr
+    assert "staging-mdl" in strip_escapes(out.stdout)
+
+
+@pytest.mark.parametrize("umask", [0o000, 0o077])
+def test_file_modes_do_not_depend_on_the_hooks_umask(ctx, fs, umask):
+    """Modes must not hinge on whatever umask the hook process inherited.
+
+    Root runs the script on every prompt, so nothing on the way to it may be
+    writable by anyone else; every user's shell reads the records, so they may
+    not be private either.
+    """
+    previous = os.umask(umask)
+    try:
+        run(ctx)
+    finally:
+        os.umask(previous)
+
+    assert fs["script"].stat().st_mode & 0o777 == 0o755
+    assert fs["bashrc"].stat().st_mode & 0o777 == 0o644
+    assert fs["principals"].stat().st_mode & 0o777 == 0o755
+    assert fs["principals"].parent.stat().st_mode & 0o777 == 0o755
+    assert (fs["principals"] / "prompt-highlighter-0").stat().st_mode & 0o777 == 0o644
 
 
 def test_a_hostile_username_cannot_run_commands(ctx, fs, tmp_path):
@@ -619,7 +709,7 @@ def test_template_literal_text_is_quoted_for_the_shell(ctx, fs, tmp_path):
     bash = strip_escapes(render_prompt(fs["script"], "bash", tmp_path))
     zsh = strip_escapes(render_prompt(fs["script"], "zsh", tmp_path))
 
-    assert "100% staging-mdl \\\\ " in bash
+    assert "100% staging-mdl " + "\\" * 4 + " " in bash
     assert "100%% staging-mdl \\ " in zsh
 
 

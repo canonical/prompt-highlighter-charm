@@ -182,8 +182,10 @@ There is no `enable-bash` counterpart: Bash is always configured
 ### 7.3 File management
 
 - **REQ-10** — The charm shall write `/usr/local/bin/juju_dynamic_prompt.py` with
-  mode `0755` and the shell profiles with mode `0644`.
-  *(`src/charm.py:133,229`)*
+  mode `0755`, the shell profiles and principal records with mode `0644`, and
+  any directory it creates with mode `0755`, pinning the umask to `022` for the
+  write so that none of those modes depends on the umask the hook inherited.
+  *(`_write_file`; asserted at `test_file_modes_do_not_depend_on_the_hooks_umask`)*
 - **REQ-11** — The charm shall write every file atomically, via a sibling
   `.<name>.juju-tmp` file that is chmod'ed and then `replace`d, so a shell can
   never read a half-written script. *(`src/charm.py:188-194`)*
@@ -271,10 +273,15 @@ There is no `enable-bash` counterpart: Bash is always configured
   sequences in `\[`/`\]`; when invoked as `… zsh`, in `%{`/`%}`; for any other
   argument it shall emit no delimiters. *(`templates/prompt.py.j2:32-35,81`)*
 - **REQ-28** — The script shall escape shell-significant characters in every
-  interpolated segment, the template's literal text included: backslashes for
-  Bash, `%` for Zsh. *(`quote`; asserted at
-  `test_generated_script_escapes_prompt_metacharacters`,
-  `test_template_literal_text_is_quoted_for_the_shell`)*
+  interpolated segment, the template's literal text included. Bash decodes
+  backslash escapes and then expands the prompt as a double-quoted string, so
+  `\`, `$`, `` ` `` and `"` shall each reach that second pass backslash-escaped
+  and the drawn prompt shall show the text as written while expanding nothing.
+  For Zsh, `%` is doubled and `$` and `` ` `` are replaced. *(`quote`; asserted
+  at `test_generated_script_escapes_prompt_metacharacters`,
+  `test_template_literal_text_is_quoted_for_the_shell`,
+  `test_bash_prompt_shows_backslashes_and_quotes_as_written`,
+  `test_bash_prompt_does_not_expand_hostile_directory_names`)*
 - **REQ-29** — When `BADGE_COLOR` is not a known colour, the script shall fall
   back to green. *(`templates/prompt.py.j2:82`)*
 - **REQ-30** — The script shall resolve the user from `USER`, `LOGNAME` or
@@ -363,9 +370,13 @@ but it is the design's main runtime cost.
 as. Profiles are normalised to `0644` and the script to `0755` on every write
 (`src/charm.py:133,229`), so local permission edits do not survive a reconcile.
 
-**Portability.** The prompt script targets the unit's system `python3` and uses
-only the standard library (`os`, `sys`), so it is independent of the charm's
-vendored virtualenv. `%`-formatting and f-strings are avoided in the template's
+**Portability.** The prompt script runs under the unit's `/usr/bin/python3` in
+isolated mode (`-I`), so that the environment of whoever is at the keyboard --
+`PATH`, `PYTHONPATH`, other `PYTHON*` variables, user site-packages -- cannot
+change what it executes (asserted at
+`test_script_runs_isolated_from_the_callers_python_environment`), and it uses
+only the standard library (`os`, `re`, `sys`), so it is independent of the
+charm's vendored virtualenv. `%`-formatting and f-strings are avoided in the template's
 runtime code paths, keeping it valid for any Python 3.
 
 **Observability.** Status messages carry the whole applied state (label, colour,
