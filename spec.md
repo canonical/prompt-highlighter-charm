@@ -1,0 +1,485 @@
+# prompt-highlighter — Specification
+
+---
+
+## 1. Purpose
+
+`prompt-highlighter` is a Juju **subordinate** charm that makes every interactive
+shell on a machine announce, in colour, which environment and which Juju
+model/unit the operator is logged into — so that a `systemctl stop` typed into
+the wrong terminal is visibly wrong before Enter is pressed.
+
+The rendered prompt is, by default, two lines — context above, cursor below
+(`render` in `templates/prompt.py.j2`):
+
+```
+ PRODUCTION  prod-openstack · nova-compute/3 · juju-a1b2c3-7  ✗ 1
+ \_ badge     \_ Juju model    \_ principals   \_ hostname    \_ last exit status
+root ~ #
+ \_ user
+      \_ cwd
+        \_ # for root, $ otherwise
+```
+
+The label is drawn as a reverse-video badge rather than bracketed text, so that
+it registers as a block of colour before it is read and still reads as inverted
+on a colourless terminal. The cursor occupies its own line, which leaves the full
+terminal width for typing: nine columns are spent before the cursor against
+seventy-nine for the equivalent single-line prompt.
+
+The context between the badge and the exit status is laid out by the
+`prompt-template` option: `$model`, `$units` and `$hostname` are replaced and
+everything else is literal separator text. `multi-line=false` puts the cursor on
+the same line as the context instead of below it.
+
+The same context is additionally written to the terminal window title, which
+follows an `ssh` or `juju ssh` back to the operator's own terminal emulator.
+
+## 2. Scope and method
+
+**In scope:** the whole repository — charm metadata, charm code, prompt
+template, test suite, tooling.
+
+**Method:** all source files were read in full (`src/charm.py` 233 lines,
+`templates/prompt.py.j2`, `tests/unit/test_charm.py`,
+`charmcraft.yaml`, `pyproject.toml`, `tox.ini`). No file in
+the tree was left unread, so the observations are complete rather than sampled.
+
+**Out of scope:** the packed `prompt-highlighter_ubuntu@*-amd64.charm` build artefacts
+(binary, gitignored) and the `.serena/` / `.pytest_cache/` tool directories.
+
+## 3. Technology stack
+
+| Concern | Choice | Evidence |
+| --- | --- | --- |
+| Charm framework | `ops ~= 3.7` | `pyproject.toml:10` |
+| Templating | `jinja2 ~= 3.1`, `StrictUndefined`, autoescape off | `pyproject.toml:11`, `src/charm.py:173-178` |
+| Charm format | `charmcraft.yaml` unified (no `metadata.yaml`/`config.yaml`) | `charmcraft.yaml:4-5` |
+| Base / platform | `ubuntu@22.04`, `ubuntu@24.04`, `ubuntu@26.04`; `amd64` only. One charm file per base, since each ships a venv built by that series' Python (3.10/3.12/3.14) | `charmcraft.yaml:32-38` |
+| Deployment model | subordinate, container-scoped `juju-info` | `charmcraft.yaml:30,42-45` |
+| Tests | `pytest` + `ops.testing` (Scenario), state-transition style, synced from `uv.lock` | `tox.ini:26-30`, `tests/unit/test_charm.py:14` |
+| Lint/format | `ruff` (line length 99, py310 — the oldest supported base, `E,F,W,I,N,D,UP,B,C4,RUF`) | `pyproject.toml:24-35` |
+| Runtime deps on the unit | none — no packages installed, no network access | absence of any `apt`/`subprocess` call in `src/charm.py` |
+
+## 4. Repository layout
+
+```
+charmcraft.yaml          charm metadata + config schema + build parts
+pyproject.toml           runtime deps (vendored into the charm) + pytest/ruff config
+uv.lock                  pinned resolution the charm venv and the tests both use
+tox.ini                  lint / unit environments
+src/charm.py             the operator: validation, rendering, file management
+templates/prompt.py.j2   the artefact rendered onto the unit
+tests/unit/test_charm.py 49 tests: charm state transitions + real prompt output
+```
+
+`parts.charm.prime` uses exclusion-only filters, so everything not listed is
+primed into the charm — notably `templates/`, which the charm reads at runtime
+via `self.charm_dir / "templates"` (`charmcraft.yaml:61-66`, `src/charm.py:174`).
+
+## 5. Architecture and data flow
+
+Two artefacts are written outside the charm directory, both derived entirely
+from Juju state:
+
+```
+Juju config ──┐
+              ├─► PromptConfig.load() ──► validated ──┐
+model name ───┤        (charm.py:80-101)              │
+principal ────┘                                       ▼
+                                        Jinja render (charm.py:171-185)
+                                                      │
+                                                      ▼
+                            /usr/local/bin/juju_dynamic_prompt.py   (0755)
+                                                      ▲
+                                                      │ exec'd per prompt
+                            /etc/bash.bashrc  managed block  (0644)
+                            /etc/zsh/zshrc    managed block  (0644, optional)
+```
+
+**Render time vs. prompt time.** The label, colour, model name, prompt
+template and layout are *baked in* at hook time as Python literals
+(`templates/prompt.py.j2`, the module-level constants). The principal units,
+user, hostname and working directory are resolved *per prompt*, so a renamed
+host or a container cloned from an image reports itself correctly without a
+re-render. The template is expanded per prompt too, since two of its three
+fields are only known then (`parse_template`, `context_pieces`).
+
+**Managed block.** Both shell profiles are edited through one primitive,
+`_apply_block` (`src/charm.py:211-229`), which strips any existing block
+delimited by `BLOCK_START`/`BLOCK_END` (`src/charm.py:32-33`) and appends a fresh
+one. This makes add / update / remove a single idempotent operation and confines
+the charm's footprint in operator-owned files to the marked region.
+
+**Shell hooks.** Bash installs a `PROMPT_COMMAND` function guarded by an
+interactive-shell check (`src/charm.py:39-54`); Zsh registers a `precmd` hook via
+`add-zsh-hook` (`src/charm.py:57-65`). Both call the generated script with the
+shell name as `argv[1]`, which selects the correct zero-width escape delimiters,
+and the exit status of the operator's last command as `argv[2]`. Both capture
+`$?` into a local as their first statement, and the Bash hook is prepended to any
+existing `PROMPT_COMMAND`, so the status is the operator's own rather than that
+of a hook that ran first.
+
+## 6. Configuration surface
+
+| Option | Type | Default | Validation | Evidence |
+| --- | --- | --- | --- | --- |
+| `label` | string | `eu-west-prod` | stripped, then `^[A-Za-z0-9_][A-Za-z0-9 _.:@+-]{0,31}$` | `charmcraft.yaml:36-42`, `src/charm.py:36,83-88` |
+| `color` | string | `green` | stripped, lowercased, ∈ {red, green, yellow, blue, magenta, cyan, white, grey} | `charmcraft.yaml:43-48`, `src/charm.py:35,90-95` |
+| `enable-zsh` | boolean | `true` | none | `charmcraft.yaml:49-54`, `src/charm.py:100` |
+| `prompt-template` | string | `$model · $units · $hostname` | stripped; ≤ 128 characters; no C0/DEL/C1 control characters; every `$` must start `$name`/`${name}` with `name` ∈ {model, units, hostname} | `charmcraft.yaml`, `_validate_template` in `src/charm.py` |
+| `multi-line` | boolean | `true` | none | `charmcraft.yaml`, `src/charm.py` |
+
+There is no `enable-bash` counterpart: Bash is always configured
+(`src/charm.py:134`).
+
+## 7. Observed requirements
+
+### 7.1 Lifecycle
+
+- **REQ-1** — When any of `install`, `start`, `upgrade-charm`, `config-changed`,
+  `juju-info-relation-joined` or `juju-info-relation-changed` fires, the charm
+  shall reconcile the on-disk configuration from current Juju state.
+  *(`src/charm.py:109-120`)*
+- **REQ-2** — The charm shall not observe `juju-info-relation-broken`, because the
+  subordinate unit is being torn down at that point.
+  *(`src/charm.py:114-117`, comment)*
+- **REQ-3** — The charm shall perform its work on every unit regardless of
+  leadership; no handler consults `unit.is_leader()`. *(`src/charm.py:104-185`)*
+- **REQ-4** — While reconciling, the charm shall report `MaintenanceStatus`
+  ("Applying prompt configuration"), and on success shall report `ActiveStatus`
+  naming the label, the colour, the layout (`two-line` or `one-line`), the
+  configured shells and — where the principal is known — the principal unit.
+  *(`_reconcile`; asserted at `test_status_message_names_the_layout`)*
+- **REQ-5** — The charm shall reconcile idempotently: repeating a hook with
+  unchanged inputs shall leave both profiles byte-identical and produce exactly
+  one managed block. *(`src/charm.py:228`; asserted at `tests/unit/test_charm.py:97-105`)*
+
+### 7.2 Configuration validation
+
+- **REQ-6** — The charm shall strip surrounding whitespace from
+  `label` and shall strip and lowercase `color` before use.
+  *(`src/charm.py:83,90`)*
+- **REQ-7** — When `label` does not match the label pattern, the charm
+  shall enter `BlockedStatus` with a message naming the option and the expected
+  character set. *(`src/charm.py:84-88`)*
+- **REQ-8** — When `color` is not one of the eight supported colours, the
+  charm shall enter `BlockedStatus` with a message listing the valid colours.
+  *(`src/charm.py:90-95`)*
+- **REQ-8a** — The charm shall strip `prompt-template` and shall enter
+  `BlockedStatus` with a message beginning `invalid prompt-template:` when it is
+  longer than 128 characters, contains a control character, contains a `$` that
+  does not start a placeholder, or names a placeholder other than `$model`,
+  `$units` or `$hostname`; the message shall name the offending placeholder or
+  character. An empty template is valid. *(`_validate_template`; asserted at
+  `test_invalid_template_blocks_without_touching_the_disk`,
+  `test_badge_only_template_is_allowed`)*
+- **REQ-9** — While the configuration is invalid, the charm shall write nothing
+  to disk and shall leave any previously applied configuration untouched — the
+  validation happens before the first write and returns early.
+  *(`src/charm.py:125-129`; asserted at `tests/unit/test_charm.py:146-152`)*
+
+### 7.3 File management
+
+- **REQ-10** — The charm shall write `/usr/local/bin/juju_dynamic_prompt.py` with
+  mode `0755`, the shell profiles and principal records with mode `0644`, and
+  any directory it creates with mode `0755`, pinning the umask to `022` for the
+  write so that none of those modes depends on the umask the hook inherited.
+  *(`_write_file`; asserted at `test_file_modes_do_not_depend_on_the_hooks_umask`)*
+- **REQ-11** — The charm shall write every file atomically, via a sibling
+  `.<name>.juju-tmp` file that is chmod'ed and then `replace`d, so a shell can
+  never read a half-written script. *(`src/charm.py:188-194`)*
+- **REQ-12** — The charm shall create missing parent directories for any file it
+  writes. *(`src/charm.py:190`)*
+- **REQ-13** — When a shell profile already exists, the charm shall preserve all
+  content outside its managed markers and append the block at the end, inserting
+  a newline first if the existing body does not end with one.
+  *(`src/charm.py:220-226`; asserted at `tests/unit/test_charm.py:86-94`)*
+- **REQ-14** — When a managed block is already present, the charm shall replace it
+  in place rather than append a second copy. *(`src/charm.py:197-208,221`)*
+- **REQ-15** — Where `enable-zsh` is `true`, the charm shall install the managed
+  block into `/etc/zsh/zshrc`, creating the file if absent.
+  *(`src/charm.py:135,214-218`)*
+- **REQ-16** — While `enable-zsh` is `false`, the charm shall remove the managed
+  block from `/etc/zsh/zshrc` if the file exists, and shall not create the file
+  if it does not. *(`src/charm.py:212-214`; asserted at `tests/unit/test_charm.py:119-122`)*
+- **REQ-17** — When applying the configuration raises `OSError`, the charm shall
+  log the traceback and enter `BlockedStatus` with the message
+  `Failed to apply prompt: <error>`. *(`src/charm.py:136-139`)*
+- **REQ-18** — When the file content would be unchanged, the charm shall skip the
+  write entirely. *(`src/charm.py:228`)*
+
+### 7.4 Removal
+
+- **REQ-19** — When `remove` fires, the charm shall strip its managed block from
+  both profiles and unlink the prompt script, leaving no trace outside its own
+  directory. *(`src/charm.py:149-158`; asserted at `tests/unit/test_charm.py:125-133`)*
+- **REQ-20** — When removal raises `OSError`, the charm shall log the failure and
+  continue, so that teardown is never blocked. *(`src/charm.py:156-158`)*
+- **REQ-21** — The charm shall tolerate a missing prompt script during removal
+  (`unlink(missing_ok=True)`). *(`src/charm.py:155`)*
+
+### 7.5 Principal-unit discovery
+
+- **REQ-22** — The charm shall take the principal unit name from the single
+  remote unit of the container-scoped `juju-info` relation.
+  *(`src/charm.py:160-169`)*
+- **REQ-23** — While no principal unit is known — for example during `install`,
+  before the relation has joined — the charm shall render the script with an
+  empty `PRINCIPAL_UNIT` and shall omit the principal from the `ActiveStatus`
+  message. *(`src/charm.py:143,184`; asserted at `tests/unit/test_charm.py:188-201`)*
+
+### 7.6 Prompt rendering (generated script)
+
+- **REQ-24** — The script shall print, on stdout, the badge followed by the
+  context rendered from `PROMPT_TEMPLATE`, then — when `MULTI_LINE` is true — a
+  newline, otherwise a single space, then `<user> <cwd> <symbol> `. With the
+  default template the context is the Juju model, principal units and hostname
+  joined by `" · "`. *(`render`; asserted at
+  `test_prompt_puts_context_above_and_the_cursor_on_its_own_line`,
+  `test_single_line_prompt_puts_the_cursor_after_the_context`)*
+- **REQ-24d** — The script shall expand `$name` and `${name}` in the template
+  to the named field, painting each field in its own colour and every literal
+  run in the separator colour; a placeholder the charm did not validate (only
+  possible by hand-editing the script) shall be shown literally.
+  *(`parse_template`, `context_pieces`; asserted at
+  `test_custom_template_orders_the_fields_and_keeps_the_literal_text`,
+  `test_braced_placeholders_are_accepted`,
+  `test_template_fields_keep_their_own_colours`)*
+- **REQ-24e** — When the context is empty, the script shall emit the badge
+  with no joining space after it. *(`render`; asserted at
+  `test_badge_only_template_is_allowed`)*
+- **REQ-24a** — The script shall draw the label as a reverse-video
+  badge, padded with one space on each side, using the background colour named
+  by `BADGE_COLOR` from the basic ANSI range so that it renders on any ANSI
+  terminal. *(`BADGES`, `render`)*
+- **REQ-24b** — The script shall print `#` as the prompt symbol when the
+  effective user id is 0 and `$` otherwise. *(`render`)*
+- **REQ-24c** — When the exit status passed as `argv[2]` is non-zero, the script
+  shall append a failure mark and that status to the context line; when it is
+  zero or absent it shall append nothing. *(`render`, `__main__`)*
+- **REQ-25** — The script shall upper-case the label. *(`render`)*
+- **REQ-26** — When a field is empty, the script shall omit it together with the
+  literal text between it and the previous field — or, when it is the first
+  field, the literal text between it and the next — rather than emit a blank
+  ` ·  · ` gap. *(`context_pieces`; asserted at
+  `test_unknown_segments_are_omitted_not_blank`,
+  `test_empty_field_takes_its_preceding_literal_with_it`,
+  `test_empty_first_field_takes_its_following_literal_with_it`)*
+- **REQ-26a** — The script shall name at most `MAX_PRINCIPALS` (2) principal
+  units and summarise any remainder as `+<n> more`. *(`current_principals`;
+  asserted at `test_long_principal_list_is_capped`)*
+- **REQ-27** — When invoked as `… bash`, the script shall wrap non-printing escape
+  sequences in `\[`/`\]`; when invoked as `… zsh`, in `%{`/`%}`; for any other
+  argument it shall emit no delimiters. *(`templates/prompt.py.j2:32-35,81`)*
+- **REQ-28** — The script shall escape shell-significant characters in every
+  interpolated segment, the template's literal text included. Bash decodes
+  backslash escapes and then expands the prompt as a double-quoted string, so
+  `\`, `$`, `` ` `` and `"` shall each reach that second pass backslash-escaped
+  and the drawn prompt shall show the text as written while expanding nothing.
+  For Zsh, `%` is doubled and `$` and `` ` `` are replaced. *(`quote`; asserted
+  at `test_generated_script_escapes_prompt_metacharacters`,
+  `test_template_literal_text_is_quoted_for_the_shell`,
+  `test_bash_prompt_shows_backslashes_and_quotes_as_written`,
+  `test_bash_prompt_does_not_expand_hostile_directory_names`)*
+- **REQ-29** — When `BADGE_COLOR` is not a known colour, the script shall fall
+  back to green. *(`templates/prompt.py.j2:82`)*
+- **REQ-30** — The script shall resolve the user from `USER`, `LOGNAME` or
+  `USERNAME` in that order, falling back to the literal `user`.
+  *(`templates/prompt.py.j2:47-52`)*
+- **REQ-31** — The script shall read the hostname at prompt time from
+  `os.uname().nodename`, falling back to `unknown-host` on `OSError` or an empty
+  nodename. *(`templates/prompt.py.j2:55-64`)*
+- **REQ-32** — The script shall abbreviate the working directory to `~` when it is
+  the home directory or `~/…` when beneath it, and shall print `?` when the
+  working directory cannot be read. *(`templates/prompt.py.j2:67-77`)*
+- **REQ-33** — When no shell argument is given, the script shall default to
+  `bash`; when the exit-status argument is absent or not an integer it shall be
+  treated as zero. *(`__main__`)*
+- **REQ-34** — The script shall reset the colour at the end of the prompt so that
+  typed input is not coloured. *(`render`)*
+- **REQ-34a** — The script shall write an OSC window-title sequence carrying
+  `[LABEL]` and the same context, rendered from the same template as plain
+  text, wrapped as non-printing, unless `TERM` names a terminal with no title
+  bar (`TITLELESS_TERMS`), in which case it shall write no sequence at all.
+  *(`window_title_text`, `render`; asserted at
+  `test_window_title_carries_the_context`,
+  `test_window_title_follows_the_template` and
+  `test_no_window_title_where_there_is_no_title_bar`)*
+- **REQ-34b** — The script shall strip control characters from the window title,
+  which would otherwise terminate the sequence early and spill the remainder
+  onto the screen. *(`window_title_text`)*
+- **REQ-34c** — Where the output encoding cannot represent a character of the
+  prompt, the script shall substitute `-` for `·`, `x` for `✗` and `?` for
+  anything else, rather than emit replacement characters or fail to print.
+  *(`encodable`; asserted at
+  `test_separator_falls_back_to_ascii_when_the_locale_cannot_encode_it`,
+  `test_unencodable_template_text_degrades_rather_than_crashing`)*
+
+### 7.7 Shell integration
+
+- **REQ-35** — While a Bash shell is non-interactive, the injected snippet shall
+  `return` immediately without defining the prompt hook.
+  *(`src/charm.py:42-45`)*
+- **REQ-36** — When `PROMPT_COMMAND` already contains the hook, the snippet shall
+  not add it again; when empty it shall set it; otherwise it shall *prepend* the
+  hook before the operator's existing commands — so that the hook still observes
+  the exit status of the operator's own last command rather than that of another
+  hook. *(`src/charm.py:49-53`)*
+- **REQ-36a** — The hook shall capture `$?` into a local before doing anything
+  else and pass it to the script as `argv[2]`, in both the Bash and the Zsh
+  snippet. *(`_bash_snippet`, `_zsh_snippet`)*
+- **REQ-37** — In Zsh, the snippet shall register the hook via
+  `add-zsh-hook precmd`, which is itself idempotent per function name.
+  *(`src/charm.py:63-64`)*
+- **REQ-38** — The prompt shall apply only to shells started after the change;
+  existing sessions keep the prompt they were started with. *(inherent to
+  profile-based installation; stated in `README.md`)*
+
+## 8. Non-functional observations
+
+**Security.** Configuration reaches the unit as *data*, never as shell text.
+`label` is constrained by a regex that excludes quotes, `$`,
+backticks, newlines and `;` (`src/charm.py:36`), and is then embedded through
+Jinja's `tojson` filter as a Python string literal
+(`templates/prompt.py.j2:13-16`) — two independent barriers against injection
+into the generated script. The test suite exercises the newline case explicitly
+(`tests/unit/test_charm.py:142`). The charm shells out to nothing: there is no
+`subprocess`, no `os.system`, no package installation and no network access in
+`src/charm.py`.
+
+**Blast radius.** Writes are confined to three fixed absolute paths
+(`src/charm.py:28-30`) and, within the two operator-owned profiles, to the
+marked region. There is no user-supplied path anywhere.
+
+**Idempotency and convergence.** `_apply_block` is a strip-then-append
+reconciliation rather than an append, and `_write_file` is skipped when content
+is unchanged (`src/charm.py:228`), so repeated hooks cause neither duplication
+nor mtime churn.
+
+**Failure handling.** Two distinct policies, both deliberate: apply-time errors
+block the unit and surface the message (REQ-17); remove-time errors are logged
+and swallowed so teardown proceeds (REQ-20).
+
+**Performance.** The prompt costs one Python interpreter start-up per command in
+every interactive shell (`src/charm.py:47,61`). That is a few tens of
+milliseconds of latency before each prompt — acceptable for an operator shell,
+but it is the design's main runtime cost.
+
+**Permissions.** All writes assume root, which is what Juju machine hooks run
+as. Profiles are normalised to `0644` and the script to `0755` on every write
+(`src/charm.py:133,229`), so local permission edits do not survive a reconcile.
+
+**Portability.** The prompt script runs under the unit's `/usr/bin/python3` in
+isolated mode (`-I`), so that the environment of whoever is at the keyboard --
+`PATH`, `PYTHONPATH`, other `PYTHON*` variables, user site-packages -- cannot
+change what it executes (asserted at
+`test_script_runs_isolated_from_the_callers_python_environment`), and it uses
+only the standard library (`os`, `re`, `sys`), so it is independent of the
+charm's vendored virtualenv. `%`-formatting and f-strings are avoided in the template's
+runtime code paths, keeping it valid for any Python 3.
+
+**Observability.** Status messages carry the whole applied state (label, colour,
+shells, principal), so `juju status` alone tells an operator what a unit is
+doing. Failures additionally go to the unit log via `logger.exception`.
+
+## 9. Acceptance criteria
+
+Derived from the 49 tests in `tests/unit/test_charm.py` (68 cases with
+parametrisation), which combine Scenario
+state transitions with *executing* the generated script in a subprocess and
+comparing real output (`tests/unit/test_charm.py:168-176`).
+
+| # | Criterion | Test |
+| --- | --- | --- |
+| AC-1 | `config-changed` writes a `0755` script containing the label and colour, and marked blocks referencing it in both profiles | `test_config_changed_writes_script_and_profiles` |
+| AC-2 | `install` alone produces a working configuration and `ActiveStatus` | `test_install_applies_configuration` |
+| AC-3 | Pre-existing profile content survives verbatim, at the top of the file | `test_existing_profile_content_is_preserved` |
+| AC-4 | Re-applying leaves exactly one block and updates the script | `test_reapplying_does_not_duplicate_the_block` |
+| AC-5 | `enable-zsh=false` removes the Zsh block only, and the status says "for bash" | `test_disabling_zsh_removes_only_the_zsh_block` |
+| AC-6 | `enable-zsh=false` never creates `/etc/zsh/zshrc` | `test_zsh_profile_is_not_created_when_disabled` |
+| AC-7 | `remove` deletes the script and restores both profiles | `test_remove_undoes_every_change` |
+| AC-8 | Five invalid-config cases block the unit and touch no file | `test_invalid_config_blocks_without_touching_the_disk` |
+| AC-9 | Whitespace and case in config values are normalised | `test_config_values_are_normalised` |
+| AC-10 | Model name and principal unit are baked into the script and named in the status | `test_script_records_model_and_principal_unit` |
+| AC-11 | `relation-joined` back-fills a principal that was unknown at `install` | `test_relation_joined_refreshes_the_principal_unit` |
+| AC-12 | The executed prompt is two lines: ` PRODUCTION  staging-mdl · ubuntu/3 · <host>` then `ubuntu <cwd> $ ` | `test_prompt_puts_context_above_and_the_cursor_on_its_own_line` |
+| AC-13 | An unknown principal yields no double separator | `test_unknown_segments_are_omitted_not_blank` |
+| AC-14 | Escapes are wrapped in `\[…\]` for Bash and `%{…%}` for Zsh | `test_generated_script_wraps_escapes_for_{bash,zsh}` |
+| AC-15 | A directory named `100%_back\slash` is escaped per shell | `test_generated_script_escapes_prompt_metacharacters` |
+| AC-16 | The label is a background-colour block, and `[PRODUCTION]` appears nowhere in the text | `test_badge_is_a_filled_block_not_bracketed_text` |
+| AC-17 | `color=grey` selects the bright-black background | `test_grey_badge_lets_development_recede` |
+| AC-18 | The window title carries `[LABEL]` and the context fields | `test_window_title_carries_the_context` |
+| AC-19 | `TERM` of `linux`, `dumb`, empty or unset emits no OSC sequence at all | `test_no_window_title_where_there_is_no_title_bar` |
+| AC-20 | A non-zero exit status is flagged on the context line; zero is not | `test_failed_command_is_flagged_on_the_context_line` |
+| AC-21 | A fourth principal is summarised as `+2 more` and not named | `test_long_principal_list_is_capped` |
+| AC-22 | An ASCII-only output encoding falls back to `-` and `x` | `test_separator_falls_back_to_ascii_when_the_locale_cannot_encode_it` |
+| AC-23 | The template is baked into the script, stripped, and the default reproduces the original prompt | `test_prompt_template_is_baked_into_the_script`, `test_template_is_stripped`, `test_default_template_reproduces_the_original_prompt` |
+| AC-24 | A custom template reorders the fields, keeps the literal text and each field's colour | `test_custom_template_orders_the_fields_and_keeps_the_literal_text`, `test_braced_placeholders_are_accepted`, `test_template_fields_keep_their_own_colours` |
+| AC-25 | An empty field takes the literal before it (or after it, when first) | `test_empty_field_takes_its_preceding_literal_with_it`, `test_empty_first_field_takes_its_following_literal_with_it` |
+| AC-26 | The window title follows the template; literal text is shell-quoted; unencodable text degrades to `?` | `test_window_title_follows_the_template`, `test_template_literal_text_is_quoted_for_the_shell`, `test_unencodable_template_text_degrades_rather_than_crashing` |
+| AC-27 | Six invalid templates block the unit naming the fault; an empty one is badge-only | `test_invalid_template_blocks_without_touching_the_disk`, `test_badge_only_template_is_allowed` |
+| AC-28 | `multi-line` defaults to two lines; `false` yields one line with the failure mark before the cursor and the colour reset at the end; the status names the layout | `test_multi_line_is_the_default`, `test_single_line_prompt_*`, `test_status_message_names_the_layout` |
+
+**Not covered:** integration/functional tests against a real Juju model, `start`
+and `upgrade-charm` handlers (they share `_reconcile`, but no test drives them),
+the `OSError` branches (REQ-17, REQ-20), and the actual sourcing of the snippets
+by a real `bash`/`zsh`.
+
+## 10. Uncertainties and discrepancies
+
+1. **The documented label pattern is wider than the implemented one.**
+   `charmcraft.yaml:40-42` and `README.md` both say "1-32 characters from
+   `[A-Za-z0-9 _.:@+-]`", but `LABEL_PATTERN` (`src/charm.py:36`) additionally
+   requires the *first* character to be `[A-Za-z0-9_]`. `.staging` or `-prod`
+   are rejected with a message that says they should be accepted. Either the
+   regex or the description should move.
+2. **`enable-zsh=true` creates `/etc/zsh/zshrc` even when Zsh is not installed**
+   (`src/charm.py:214-218`, `190`). Since `enable-zsh` defaults to `true`, the
+   default deployment creates `/etc/zsh/` on machines with no Zsh. If Zsh is
+   installed afterwards, `dpkg` will see a pre-existing conffile it did not
+   create and prompt on upgrade. Intentional convenience or an oversight is not
+   determinable from the code.
+3. **An unterminated `BLOCK_START` swallows the rest of the file.**
+   `_strip_block` (`src/charm.py:197-208`) skips lines from `BLOCK_START` until
+   it finds `BLOCK_END`; if the end marker has been deleted by hand, every
+   subsequent line is dropped and then overwritten. There is no guard and no
+   test for a mangled block.
+4. **Profile mode and ownership are normalised on every write.** `_write_file`
+   creates a fresh file and `replace`s the original (`src/charm.py:188-194`), so
+   a profile with non-default permissions, extended attributes or a hard link is
+   silently reset to `0644` on the next reconcile.
+5. **A removed charm leaves live shells with an empty prompt.** After `remove`,
+   sessions still running the hook call a script that no longer exists;
+   `PS1="$(…)"` then evaluates to the empty string until the shell restarts.
+   Not observed in tests; inferred from `src/charm.py:47` plus REQ-19.
+6. **`amd64`-only.** `charmcraft.yaml:24-25` declares a single platform even
+   though nothing in the charm is architecture-specific. Whether arm64 was
+   deliberately excluded is unclear.
+7. **No `update-status` handler**, so a unit whose profiles were edited by hand
+   between hooks will keep reporting `ActiveStatus` until the next event.
+8. **No `enable-bash` option**: Bash is unconditional (`src/charm.py:134`). This
+   is consistent with the charm's purpose but is an asymmetry with `enable-zsh`.
+
+## 11. Recommendations
+
+Ordered by value, and each is a small change:
+
+1. **Reconcile the label pattern with its documentation** (uncertainty 1) — fix
+   the description in `charmcraft.yaml` and `README.md`, or relax the regex's
+   first character. One-line change either way; today the error message
+   contradicts the docs.
+2. **Guard `_strip_block` against a missing end marker** (uncertainty 3) — if
+   `skipping` is still true at the end of the loop, log a warning and keep the
+   original lines rather than dropping them. Add a test for a hand-mangled block.
+3. **Only create `/etc/zsh/zshrc` when Zsh is present** (uncertainty 2) — e.g.
+   skip creation when the directory does not already exist, and let the existing
+   `enable-zsh` re-run pick it up later. Alternatively document the behaviour.
+4. **Cover the `OSError` paths** — a test that makes `_write_file` raise would
+   pin REQ-17 and REQ-20, which are currently untested error policy.
+5. **Consider caching in the Bash hook** — the prompt spawns Python per command
+   (§8, Performance). The baked-in segments could be exported once and only the
+   hostname/cwd computed by the shell itself, if the latency ever matters.
+6. **Add an integration test** (`tox -e integration` with `jubilant` or
+   `pytest-operator`) that deploys against `ubuntu` and asserts the block lands
+   in a real `/etc/bash.bashrc`, closing the gap listed at the end of §9.

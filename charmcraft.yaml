@@ -1,0 +1,110 @@
+# Copyright 2025 Canonical Ltd.
+# See LICENSE file for licensing details.
+
+name: prompt-highlighter
+type: charm
+title: Prompt Highlighter
+
+summary: Dynamically configures custom colored terminal prompts based on Juju configuration.
+
+description: |
+  A subordinate charm that deploys a Python-driven terminal prompt highlighter.
+
+  It renders /usr/local/bin/juju_dynamic_prompt.py from the charm's template and
+  installs a managed snippet into the system-wide Bash profile (and optionally the
+  Zsh profile), so every interactive shell on the unit gets a prompt showing the
+  label as a reverse-video badge alongside the model, principals and host, laid
+  out as the prompt-template option says. By default the cursor then goes on a
+  line of its own with the full terminal width to type in; multi-line=false puts
+  it on the same line instead.
+
+  The same context is written to the terminal window title, which follows an ssh
+  or a `juju ssh` back to the operator's own terminal.
+
+  Everything the charm writes is delimited by managed markers and is removed again
+  when the charm is removed or when the corresponding option is disabled.
+
+  Juju runs *one subordinate unit per principal unit*, not one per machine. Relate
+  this charm to both `nova-compute` and `ceph-osd` and a machine hosting one unit of
+  each gets *two* `prompt-highlighter` units, both running hooks against the same
+  `/etc/bash.bashrc` and the same script.
+
+subordinate: true
+
+# One charm file per base rather than one for all of them: the charm ships a
+# venv built by the base's own Python (3.10 on 22.04, 3.12 on 24.04, 3.14 on
+# 26.04), and compiled wheels in it are tied to that version.
+platforms:
+  ubuntu@22.04:amd64:
+  ubuntu@24.04:amd64:
+  ubuntu@26.04:amd64:
+
+# A subordinate charm must request container scope on at least one endpoint,
+# otherwise Juju refuses to deploy it.
+requires:
+  juju-info:
+    interface: juju-info
+    scope: container
+
+config:
+  options:
+    label:
+      type: string
+      default: "eu-west-prod"
+      description: >
+        The text shown in the prompt badge (e.g. production, staging, or a
+        customer name). Limited to 32 characters from [A-Za-z0-9 _.:@+-] so
+        that it is safe to embed in a shell prompt.
+    color:
+      type: string
+      default: "green"
+      description: >
+        Background colour of the badge. One of: red, green, yellow, blue,
+        magenta, cyan, white, grey. For example pick grey for staging and 
+        red for production.
+    enable-zsh:
+      type: boolean
+      default: true
+      description: >
+        If true, configure the global Zsh profile in addition to Bash. Setting
+        this back to false removes the Zsh configuration again.
+    prompt-template:
+      type: string
+      default: "$model · $units · $hostname"
+      description: >
+        How the context after the badge is laid out. $model, $units and
+        $hostname (or ${model} etc.) are replaced by the Juju model, the
+        principal unit(s) on this machine and the hostname; everything else is
+        shown as written, so the text between the placeholders is the
+        separator. At most 128 characters, no control characters. A field that
+        is empty -- the units before the juju-info relation has joined -- is
+        dropped together with the text before it. An empty template leaves
+        just the badge.
+    multi-line:
+      type: boolean
+      default: true
+      description: >
+        If true, the badge and the context go on one line and the cursor
+        (user, directory and prompt symbol) on the next. If false, everything
+        is on a single line.
+
+parts:
+  charm:
+    # uv rather than the charm plugin: charmcraft 4.4 still refuses the charm
+    # plugin on ubuntu@26.04 unless CHARMCRAFT_ENABLE_EXPERIMENTAL_EXTENSIONS is
+    # set, and that would be needed for every base, not just that one. uv builds
+    # the venv from pyproject.toml and the committed uv.lock instead.
+    plugin: uv
+    source: .
+    build-snaps:
+      - astral-uv
+    # The uv plugin stages only src/, lib/ and the venv -- unlike the charm
+    # plugin, which copied the whole project. templates/ has to be asked for by
+    # name, and without it the charm cannot render the prompt script at all.
+    override-build: |
+      craftctl default
+      cp --archive --reflink=auto templates "$CRAFT_PART_INSTALL/templates"
+      cp --archive --reflink=auto LICENSE README.md "$CRAFT_PART_INSTALL/"
+    prime:
+      - "-**/__pycache__"
+      - "-**/*.pyc"
