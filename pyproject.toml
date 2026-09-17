@@ -4,10 +4,13 @@
 [project]
 name = "prompt-highlighter"
 version = "0.1.0"
-# 3.10 is what ubuntu@22.04 ships; the charm code must stay within it.
-requires-python = ">=3.10"
+# 3.8 is what ubuntu@20.04 ships; the charm code must stay within it.
+requires-python = ">=3.8"
 dependencies = [
-    "ops ~= 3.7",
+    # ops 3 needs Python 3.10, so ubuntu@20.04 gets the 2.23 series, which is
+    # still maintained and keeps the same API for everything the charm uses.
+    "ops ~= 3.7; python_version >= '3.10'",
+    "ops ~= 2.23; python_version < '3.10'",
     "jinja2 ~= 3.1",
 ]
 
@@ -24,8 +27,8 @@ testpaths = ["tests/unit"]
 [tool.ruff]
 line-length = 99
 # The oldest Python the charm runs on, so that no rule rewrites the source into
-# syntax that ubuntu@22.04 cannot parse.
-target-version = "py310"
+# syntax that ubuntu@20.04 cannot parse.
+target-version = "py38"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "D", "UP", "B", "C4", "RUF"]

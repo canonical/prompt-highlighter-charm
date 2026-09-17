@@ -32,9 +32,10 @@ description: |
 subordinate: true
 
 # One charm file per base rather than one for all of them: the charm ships a
-# venv built by the base's own Python (3.10 on 22.04, 3.12 on 24.04, 3.14 on
-# 26.04), and compiled wheels in it are tied to that version.
+# venv built by the base's own Python (3.8 on 20.04, 3.10 on 22.04, 3.12 on
+# 24.04, 3.14 on 26.04), and compiled wheels in it are tied to that version.
 platforms:
+  ubuntu@20.04:amd64:
   ubuntu@22.04:amd64:
   ubuntu@24.04:amd64:
   ubuntu@26.04:amd64:

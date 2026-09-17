@@ -11,6 +11,8 @@ outside the charm directory is wrapped in managed markers so that it can be
 updated in place and removed cleanly.
 """
 
+from __future__ import annotations
+
 import contextlib
 import dataclasses
 import logging
@@ -108,7 +110,7 @@ class PromptConfig:
     multi_line: bool
 
     @classmethod
-    def load(cls, config: ops.ConfigData) -> "PromptConfig":
+    def load(cls, config: ops.ConfigData) -> PromptConfig:
         """Read and validate the charm config, raising ConfigError if unusable."""
         label = typing.cast(str, config["label"]).strip()
         if not LABEL_PATTERN.fullmatch(label):
