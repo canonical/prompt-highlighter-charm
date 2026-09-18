@@ -1,0 +1,38 @@
+# The charm is not an installable package; this file exists so that uv can
+# resolve the charm's runtime dependencies into uv.lock, which the uv part in
+# charmcraft.yaml then installs into the charm's venv.
+[project]
+name = "prompt-highlighter"
+version = "0.1.0"
+# 3.8 is what ubuntu@20.04 ships; the charm code must stay within it.
+requires-python = ">=3.8"
+dependencies = [
+    # ops 3 needs Python 3.10, so ubuntu@20.04 gets the 2.23 series, which is
+    # still maintained and keeps the same API for everything the charm uses.
+    "ops ~= 3.7; python_version >= '3.10'",
+    "ops ~= 2.23; python_version < '3.10'",
+    "jinja2 ~= 3.1",
+]
+
+[dependency-groups]
+lint = ["ruff"]
+unit = [
+    "ops[testing]",
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
+
+[tool.ruff]
+line-length = 99
+# The oldest Python the charm runs on, so that no rule rewrites the source into
+# syntax that ubuntu@20.04 cannot parse.
+target-version = "py38"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "D", "UP", "B", "C4", "RUF"]
+ignore = ["D203", "D213"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D100", "D103"]
